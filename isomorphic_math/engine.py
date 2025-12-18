@@ -116,7 +116,7 @@ class MathEngine:
             if isinstance(expr, str):
                 expr = self.parser.parse(expr)
             return not self._has_invalid(expr)
-        except:
+        except Exception:
             return False
     
     def _has_invalid(self, expr: Expr) -> bool:
