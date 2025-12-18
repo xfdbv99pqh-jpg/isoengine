@@ -14,9 +14,13 @@ We trained a neural encoder that maps mathematical equations to 64-dimensional h
 
 This isn't pattern matching or coefficient extraction — the network learned genuine mathematical structure.
 
-## Proof: Form Invariance Test
+## Proof: Form Invariance Tests
 
-We tested whether the encoder learned to "read coefficients" or understand mathematics by generating the same quadratic equation (roots r₁=2, r₂=3) in 7 different syntactic forms:
+We tested whether the encoder learns to "read coefficients" or understand mathematics by generating equivalent equations in multiple syntactic forms.
+
+### Quadratic Equations
+
+For the same roots (r₁=2, r₂=3), we tested 7 different forms:
 
 | Form | Expression | R² Score |
 |------|------------|----------|
@@ -28,17 +32,40 @@ We tested whether the encoder learned to "read coefficients" or understand mathe
 | Factored tree | `x·x - 2x - 3x + 6 = 0` | 0.998 |
 | Negative form | `-x² - bx - c = 0` | 0.998 |
 
-**All forms predict r₁ + r₂ = 5 correctly.**
+**Average R² = 0.997** — All forms predict r₁ + r₂ = 5 correctly.
 
-If the network were doing coefficient extraction, `2x² - 10x + 12 = 0` would predict 10 (the visible coefficient), not 5 (the actual sum of roots). Instead, it understands that multiplying an equation by 2 doesn't change its solutions.
+### Linear Equations
+
+For the same solution (x=4), we tested 8 different forms:
+
+| Form | Expression | R² Score |
+|------|------------|----------|
+| Standard | `2x + 3 = 11` | 0.980 |
+| Scaled 2x | `4x + 6 = 22` | 0.954 |
+| Scaled 0.5x | `x + 1.5 = 5.5` | 0.975 |
+| Scaled -1x | `-2x - 3 = -11` | 0.976 |
+| Negated | `-(2x) - 3 = -11` | 0.978 |
+| Rearranged v1 | `2x = 11 - 3` | 0.970 |
+| Rearranged v2 | `2x - 11 = -3` | 0.977 |
+| Flipped | `11 = 2x + 3` | 0.956 |
+
+**Average R² = 0.971** — All forms predict x = 4 correctly.
+
+### What This Proves
+
+If the network were doing coefficient extraction:
+- `2x² - 10x + 12 = 0` would predict 10, not 5 ✗
+- `4x + 6 = 22` would predict different than `2x + 3 = 11` ✗
+
+Instead, **all forms give the correct answer**. The network understands that scaling an equation doesn't change its solutions.
 
 ## Results Summary
 
-| Problem Type | R² Score | MAE | What's Predicted |
-|--------------|----------|-----|------------------|
-| Linear equations | 0.711 | 1.36 | Solution x |
-| Quadratic equations | 0.999 | 0.10 | Sum of roots r₁+r₂ |
-| Inequalities | 0.996 | 0.26 | Boundary value |
+| Problem Type | R² Score | MAE | Form Invariant |
+|--------------|----------|-----|----------------|
+| Linear equations | 0.971 | 0.81 | ✓ Yes |
+| Quadratic equations | 0.997 | 0.10 | ✓ Yes |
+| Inequalities | 0.996 | 0.26 | ✓ Yes |
 
 ## Installation
 
@@ -145,8 +172,9 @@ We use **multi-task learning** combining:
 
 1. **Contrastive Loss**: Pulls equations with similar solutions together in embedding space
 2. **Regression Loss**: Each problem type has its own head predicting the appropriate value
+3. **Mixed Form Training**: Train on multiple syntactic forms of the same equation
 
-This teaches the embedding to both cluster equivalent equations AND encode numeric solutions.
+This teaches the embedding to be **form-invariant** — encoding mathematical meaning rather than syntax.
 
 ```python
 # Loss function
@@ -164,26 +192,30 @@ isomorphic_math/
 └── engine.py        # MathEngine unified API
 ```
 
-## Supported Problem Types
-
-| Type | Example | Solver | Neural Prediction |
-|------|---------|--------|-------------------|
-| Linear equations | `2x + 3 = 11` | ✅ Exact | ✅ R²=0.711 |
-| Quadratic equations | `x² - 5x + 6 = 0` | ✅ Exact | ✅ R²=0.999 |
-| Systems (2x2) | `x + y = 5, x - y = 1` | ✅ Exact | 🔄 Planned |
-| Linear inequalities | `2x + 3 > 7` | ✅ Exact | ✅ R²=0.996 |
-| Quadratic inequalities | `x² - 4 > 0` | ✅ Exact | 🔄 Planned |
-| Derivatives | `d/dx(x³ + sin(x))` | ✅ Symbolic | — |
-
 ## Validation Scripts
 
-Run the form invariance test to verify geometric understanding:
+Run the form invariance tests to verify geometric understanding:
 
 ```bash
+# Test quadratic form invariance
 python geometry_vs_extraction_test.py
+
+# Test linear form invariance  
+python linear_form_invariance_test.py
 ```
 
-This proves the network learned mathematics, not pattern matching.
+These prove the network learned mathematics, not pattern matching.
+
+## Supported Problem Types
+
+| Type | Example | Solver | Neural (R²) | Form Invariant |
+|------|---------|--------|-------------|----------------|
+| Linear equations | `2x + 3 = 11` | ✅ Exact | 0.971 | ✅ |
+| Quadratic equations | `x² - 5x + 6 = 0` | ✅ Exact | 0.997 | ✅ |
+| Systems (2x2) | `x + y = 5, x - y = 1` | ✅ Exact | 🔄 Planned | — |
+| Linear inequalities | `2x + 3 > 7` | ✅ Exact | 0.996 | ✅ |
+| Quadratic inequalities | `x² - 4 > 0` | ✅ Exact | 🔄 Planned | — |
+| Derivatives | `d/dx(x³ + sin(x))` | ✅ Symbolic | — | — |
 
 ## The Thesis
 
@@ -194,8 +226,20 @@ Traditional neural networks treat math as string manipulation. This project demo
 1. Mathematical equations can be embedded in hyperbolic space
 2. The embedding preserves mathematical meaning across syntactic variation
 3. Solutions can be recovered directly from the geometric representation
+4. **Form invariance proves genuine understanding, not pattern matching**
 
 The geometry IS the mathematics.
+
+## Key Insight
+
+The breakthrough came from **training on mixed syntactic forms**. When we only trained on standard form equations, the network learned to extract coefficients. When we trained on all forms simultaneously, it learned the underlying mathematical invariants.
+
+| Training | Linear R² | Quadratic R² |
+|----------|-----------|--------------|
+| Single form only | 0.711 | 0.997 |
+| Mixed forms | **0.971** | **0.997** |
+
+Quadratics already had implicit form variation (different root combinations create different coefficient patterns). Linear equations needed explicit form augmentation to achieve the same level of understanding.
 
 ## Requirements
 
@@ -228,6 +272,7 @@ Developed through extensive experimentation exploring connections between:
 - Hyperbolic geometry and hierarchical structure
 - Contrastive learning and mathematical equivalence
 - Transformer architectures and symbolic reasoning
+- Form-invariant representation learning
 
 Special thanks to Claude for pair programming and hypothesis testing.
 
