@@ -4,18 +4,25 @@ Isomorphic Math Engine
 Geometric embeddings for mathematical equations.
 
 Usage:
-    from isomorphic_math import MathEngine, solve, encode
-    
+    from isomorphic_math import MathEngine, solve, parse
+
     # Quick solve
     result = solve("2x + 3 = 11")
-    
-    # Full engine
+
+    # Full engine with neural encoder
     engine = MathEngine()
     engine.train(epochs=1000)
     similarity = engine.similarity("2x = 6", "x + 1 = 4")
 
+    # Multi-head solution prediction (best results)
+    from isomorphic_math import HyperbolicEncoder, MultiHeadTrainer
+    encoder = HyperbolicEncoder()
+    trainer = MultiHeadTrainer(encoder, device)
+    trainer.train(epochs=3000)
+    prediction = trainer.predict_linear([equation])
+
 Author: Big J + Claude
-Version: 32.0
+Version: 33.0
 """
 
 from .core import (
@@ -27,17 +34,17 @@ from .core import (
     System, Or, And,
     Sin, Cos, Tan, Ln, Exp, Sqrt, Abs,
     Deriv,
-    
+
     # Parser
     MathParser,
-    
+
     # Solvers
     LinearSolver, QuadraticSolver, SystemSolver, InequalitySolver,
     MathSolver,
-    
+
     # Calculus
     Differentiator, Simplifier,
-    
+
     # Generators
     ProblemGenerator,
 )
@@ -47,6 +54,8 @@ from .encoder import (
     ContrastiveTrainer,
     SolutionPredictor,
 )
+
+from .multihead import MultiHeadTrainer
 
 from .engine import MathEngine
 
@@ -80,7 +89,7 @@ def similarity(expr1, expr2):
     """Compare two expressions (requires trained encoder)."""
     return get_engine().similarity(expr1, expr2)
 
-__version__ = "32.0"
+__version__ = "33.0"
 __all__ = [
     # Core
     'Op', 'Expr', 'ProblemType',
@@ -90,14 +99,15 @@ __all__ = [
     'System', 'Or', 'And',
     'Sin', 'Cos', 'Tan', 'Ln', 'Exp', 'Sqrt', 'Abs',
     'Deriv',
-    
+
     # Classes
     'MathParser', 'MathSolver', 'MathEngine',
     'LinearSolver', 'QuadraticSolver', 'SystemSolver', 'InequalitySolver',
     'Differentiator', 'Simplifier',
     'ProblemGenerator',
     'HyperbolicEncoder', 'ContrastiveTrainer', 'SolutionPredictor',
-    
+    'MultiHeadTrainer',
+
     # Functions
     'solve', 'parse', 'differentiate', 'encode', 'similarity',
     'get_engine',
