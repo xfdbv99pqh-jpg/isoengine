@@ -6,7 +6,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="isomorphic_math",
-    version="32.0",
+    version="33.0",
     description="Geometric embeddings for mathematical equations",
     author="Big J + Claude",
     packages=find_packages(),
