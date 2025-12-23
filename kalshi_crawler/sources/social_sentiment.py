@@ -173,59 +173,10 @@ class SocialSentimentCrawler(BaseCrawler):
         return results
 
     def _scrape_twitter_trends(self) -> list[dict]:
-        """Scrape Twitter/X trends (limited without API)."""
-        results = []
-
-        try:
-            # Try nitter instances for public tweets
-            # Note: Many nitter instances are blocked/down
-            nitter_instances = [
-                "https://nitter.net",
-                "https://nitter.1d4.us",
-            ]
-
-            # Search for relevant hashtags
-            search_terms = ["#Fed", "#FOMC", "#inflation", "#election2024"]
-
-            for instance in nitter_instances:
-                for term in search_terms[:2]:  # Limit to avoid blocks
-                    try:
-                        url = f"{instance}/search?q={term}&f=tweets"
-                        headers = {
-                            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                        }
-
-                        response = self.session.get(url, headers=headers, timeout=self.timeout)
-                        if response.status_code == 200:
-                            soup = BeautifulSoup(response.text, "html.parser")
-
-                            # Find tweets
-                            tweets = soup.find_all(class_=re.compile(r"tweet|timeline-item", re.I))
-
-                            for tweet in tweets[:10]:
-                                try:
-                                    content = tweet.find(class_=re.compile(r"content|text", re.I))
-                                    if content:
-                                        result = {
-                                            "source": "twitter_nitter",
-                                            "search_term": term,
-                                            "text": content.get_text(strip=True)[:280],
-                                            "scraped_at": datetime.utcnow().isoformat(),
-                                        }
-                                        results.append(result)
-
-                                except Exception:
-                                    continue
-
-                            break  # Found working instance
-
-                    except Exception:
-                        continue
-
-        except Exception as e:
-            logger.debug(f"Twitter/Nitter scrape failed: {e}")
-
-        return results
+        """Scrape Twitter/X trends - disabled as Nitter is mostly dead."""
+        # Nitter instances are mostly down/blocked now
+        # This is a placeholder for future X API integration
+        return []
 
     def _analyze_sentiment(self, text: str) -> str:
         """Simple keyword-based sentiment analysis."""

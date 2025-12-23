@@ -326,6 +326,7 @@ class StrategyGenerator:
             volume = k_data.get("volume") or 0
             volume_24h = k_data.get("volume_24h") or 0
             open_interest = k_data.get("open_interest") or 0
+            close_time = k_data.get("close_time") or k_data.get("expiration_time")
 
             if not price:
                 continue
@@ -333,6 +334,17 @@ class StrategyGenerator:
             # Skip dead markets ($0.01 or $0.99) - these are essentially resolved
             if price <= 0.02 or price >= 0.98:
                 continue
+
+            # Skip far-future markets (more than 90 days out) - not actionable
+            if close_time:
+                try:
+                    if isinstance(close_time, str):
+                        close_dt = datetime.fromisoformat(close_time.replace('Z', '+00:00').replace('+00:00', ''))
+                        days_to_expiry = (close_dt - now).days
+                        if days_to_expiry > 90:
+                            continue
+                except:
+                    pass
 
             # Require RECENT activity, not just historical volume
             has_recent_activity = volume_24h >= 100
