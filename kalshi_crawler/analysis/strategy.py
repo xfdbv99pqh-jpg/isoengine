@@ -312,7 +312,7 @@ class StrategyGenerator:
         return recommendations[:10]
 
     def _analyze_volume_price_extremes(self) -> list[TradeRecommendation]:
-        """Find liquid markets with interesting price levels."""
+        """Find near-term markets with uncertain outcomes and high activity."""
         recommendations = []
         now = datetime.utcnow()
 
@@ -331,11 +331,11 @@ class StrategyGenerator:
             if not price:
                 continue
 
-            # Skip dead markets ($0.01 or $0.99) - these are essentially resolved
-            if price <= 0.02 or price >= 0.98:
+            # Skip nearly resolved markets
+            if price <= 0.05 or price >= 0.95:
                 continue
 
-            # Calculate days to expiry if available
+            # Calculate days to expiry
             days_to_expiry = None
             if close_time:
                 try:
@@ -345,67 +345,69 @@ class StrategyGenerator:
                 except:
                     pass
 
-            # Require some activity
-            has_activity = volume_24h >= 100 or volume > 10000
-            is_active = volume_24h >= 500
-            is_very_active = volume_24h >= 3000
+            # FOCUS: Near-term uncertain markets (expiring soon with prices 20-80%)
+            # These are the most actionable - real decisions coming soon
+            is_near_term = days_to_expiry is not None and 0 < days_to_expiry <= 14
+            is_uncertain = 0.20 <= price <= 0.80
+            has_activity = volume_24h >= 500
 
-            if not has_activity:
-                continue
+            if is_near_term and is_uncertain and has_activity:
+                reasoning = [
+                    f"Expires in {days_to_expiry} days with uncertain price ${price:.2f}",
+                    f"Active trading: {volume_24h:,} contracts in 24h",
+                    "Near-term resolution = high potential for price movement",
+                ]
 
-            reasoning = []
-            action = "HOLD"
-            confidence = "LOW"
-            edge = None
-
-            # Prefer near-term markets (bonus for <30 days)
-            near_term_bonus = days_to_expiry is not None and days_to_expiry <= 30
-
-            # Low price (3-20%) with activity - potential value
-            if 0.03 <= price <= 0.20 and is_active:
-                reasoning.append(f"Price ${price:.2f} - market says {price*100:.0f}% chance")
-                reasoning.append(f"Active trading: {volume_24h:,} contracts in 24h")
-                if near_term_bonus:
-                    reasoning.append(f"Expires in {days_to_expiry} days - near-term catalyst")
-                    confidence = "MEDIUM"
+                # Lean YES if price < 0.50, NO if > 0.50
+                if price < 0.45:
+                    action = "BUY_YES"
+                    edge = (0.50 - price) * 100
+                    reasoning.append(f"Currently trading below 50% - potential upside if YES")
+                elif price > 0.55:
+                    action = "BUY_NO"
+                    edge = (price - 0.50) * 100
+                    reasoning.append(f"Currently trading above 50% - potential value in NO")
                 else:
-                    reasoning.append("Low price with activity suggests potential opportunity")
-                action = "BUY_YES"
-                edge = (0.30 - price) * 100
+                    action = "HOLD"
+                    edge = None
+                    reasoning.append("Price near 50/50 - wait for directional signal")
 
-            # High price (80-97%) with activity
-            elif 0.80 <= price <= 0.97 and is_active:
-                reasoning.append(f"Price ${price:.2f} - market says {price*100:.0f}% likely")
-                reasoning.append(f"Active trading: {volume_24h:,} contracts in 24h")
-                if near_term_bonus:
-                    reasoning.append(f"Expires in {days_to_expiry} days - near-term resolution")
-                    confidence = "MEDIUM"
-                else:
-                    reasoning.append("High price but not certain - potential NO value")
-                action = "BUY_NO"
-                edge = (price - 0.70) * 100
+                confidence = "MEDIUM" if days_to_expiry <= 7 else "LOW"
 
-            # Mid-range with high volume spike = something happening
-            elif 0.25 <= price <= 0.75 and is_very_active:
-                reasoning.append(f"Uncertain price ${price:.2f} with HIGH activity")
-                reasoning.append(f"24h volume spike: {volume_24h:,} contracts")
-                reasoning.append("Market is actively debating - research opportunity")
-                action = "HOLD"
-                confidence = "MEDIUM"
+                if action != "HOLD":
+                    recommendations.append(TradeRecommendation(
+                        ticker=ticker,
+                        title=title,
+                        action=action,
+                        confidence=confidence,
+                        current_price=price,
+                        target_price=None,
+                        reasoning=reasoning,
+                        category="near_term_uncertain",
+                        data_sources=["kalshi"],
+                        timestamp=now,
+                        edge=edge,
+                    ))
 
-            if reasoning and action != "HOLD":
+            # Also flag high-activity mid-range markets regardless of expiry
+            elif is_uncertain and volume_24h >= 5000:
+                high_vol_reasoning = [
+                    f"Uncertain price ${price:.2f} with HIGH activity",
+                    f"24h volume: {volume_24h:,} contracts",
+                    "Market is actively debating - worth researching",
+                ]
                 recommendations.append(TradeRecommendation(
                     ticker=ticker,
                     title=title,
-                    action=action,
-                    confidence=confidence,
+                    action="HOLD",
+                    confidence="MEDIUM",
                     current_price=price,
                     target_price=None,
-                    reasoning=reasoning,
+                    reasoning=high_vol_reasoning,
                     category="volume_extreme",
                     data_sources=["kalshi"],
                     timestamp=now,
-                    edge=edge,
+                    edge=None,
                 ))
 
         # Sort by volume
