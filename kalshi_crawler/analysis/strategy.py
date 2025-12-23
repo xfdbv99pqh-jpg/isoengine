@@ -1,13 +1,20 @@
 """
 Kalshi Investment Strategy Generator
 
-Analyzes crawled data to generate actionable trading recommendations.
+Sophisticated analysis combining:
+- Price momentum and trends
+- Cross-market arbitrage (Kalshi vs Polymarket)
+- Economic indicator alignment
+- Volume and liquidity analysis
+- Expiration timing
+- News sentiment
 """
 
 import json
 import logging
-from datetime import datetime
-from dataclasses import dataclass
+import re
+from datetime import datetime, timedelta
+from dataclasses import dataclass, field
 from typing import Optional
 
 from ..storage.db import CrawlerDatabase
@@ -29,11 +36,13 @@ class TradeRecommendation:
     category: str
     data_sources: list[str]
     timestamp: datetime
+    edge: Optional[float] = None  # Expected edge/alpha
 
     def __str__(self):
         arrow = "↑" if self.action == "BUY_YES" else "↓" if self.action == "BUY_NO" else "→"
         price_str = f"${self.current_price:.2f}" if self.current_price else "N/A"
-        return f"[{self.confidence}] {arrow} {self.action} {self.ticker} @ {price_str}\n    {self.title[:60]}..."
+        edge_str = f" (edge: {self.edge:+.1f}%)" if self.edge else ""
+        return f"[{self.confidence}] {arrow} {self.action} {self.ticker} @ {price_str}{edge_str}\n    {self.title[:60]}..."
 
     def to_dict(self) -> dict:
         return {
@@ -47,20 +56,12 @@ class TradeRecommendation:
             "category": self.category,
             "data_sources": self.data_sources,
             "timestamp": self.timestamp.isoformat(),
+            "edge": self.edge,
         }
 
 
 class StrategyGenerator:
     """Generates Kalshi trading strategies based on collected data."""
-
-    # Indicator thresholds for economic markets
-    INDICATOR_THRESHOLDS = {
-        "UNRATE": {"bullish_below": 4.0, "bearish_above": 5.0},  # Unemployment
-        "CPIAUCSL": {"yoy_bullish_below": 2.5, "yoy_bearish_above": 3.5},  # CPI
-        "FEDFUNDS": {"cut_signal": -0.25, "hike_signal": 0.25},  # Fed Funds
-        "DGS10": {"low": 4.0, "high": 5.0},  # 10Y Treasury
-        "T10Y2Y": {"inversion_warning": 0, "normal": 0.5},  # Yield curve
-    }
 
     def __init__(self, db: CrawlerDatabase):
         self.db = db
@@ -69,76 +70,293 @@ class StrategyGenerator:
         """Generate all trading recommendations."""
         recommendations = []
 
-        # Kalshi market opportunities (price extremes, volume)
-        recommendations.extend(self._analyze_kalshi_opportunities())
+        # 1. Cross-market arbitrage (highest confidence)
+        recommendations.extend(self._find_arbitrage_opportunities())
 
-        # Economic-based recommendations
-        recommendations.extend(self._analyze_economic_markets())
+        # 2. Economic indicator misalignment
+        recommendations.extend(self._analyze_economic_misalignment())
 
-        # Cross-market arbitrage opportunities
-        recommendations.extend(self._analyze_arbitrage())
+        # 3. High volume + price extreme opportunities
+        recommendations.extend(self._analyze_volume_price_extremes())
 
-        # News-driven opportunities
-        recommendations.extend(self._analyze_news_catalysts())
+        # 4. Expiring soon with uncertain prices
+        recommendations.extend(self._analyze_expiring_markets())
 
-        # Sort by confidence
+        # 5. News-driven momentum
+        recommendations.extend(self._analyze_news_momentum())
+
+        # Sort by confidence then edge
         confidence_order = {"HIGH": 0, "MEDIUM": 1, "LOW": 2}
-        recommendations.sort(key=lambda x: confidence_order.get(x.confidence, 3))
+        recommendations.sort(key=lambda x: (
+            confidence_order.get(x.confidence, 3),
+            -(x.edge or 0)
+        ))
 
         return recommendations
 
-    def _analyze_kalshi_opportunities(self) -> list[TradeRecommendation]:
-        """Find opportunities in Kalshi markets based on price and volume."""
+    def _find_arbitrage_opportunities(self) -> list[TradeRecommendation]:
+        """Find price discrepancies between Kalshi and Polymarket."""
         recommendations = []
         now = datetime.utcnow()
 
         kalshi_markets = self.db.get_latest_markets(source="kalshi", limit=1000)
+        poly_markets = self.db.get_latest_markets(source="polymarket", limit=500)
 
-        for market in kalshi_markets:
-            data = json.loads(market.get("data", "{}"))
-            ticker = data.get("ticker", "UNKNOWN")
-            title = data.get("title", "")
-            price = data.get("yes_price")
-            volume = data.get("volume") or 0
-            volume_24h = data.get("volume_24h") or 0
-            open_interest = data.get("open_interest") or 0
+        # Build searchable index of Polymarket markets
+        poly_index = []
+        for pm in poly_markets:
+            data = json.loads(pm.get("data", "{}"))
+            question = (data.get("question") or "").lower()
+            prices = data.get("prices", {})
+            yes_price = prices.get("Yes") or prices.get("yes")
+            if yes_price and question:
+                poly_index.append({
+                    "question": question,
+                    "price": yes_price,
+                    "data": data,
+                    "words": set(re.findall(r'\b\w{4,}\b', question)),
+                })
 
-            if price is None:
+        # Compare each Kalshi market
+        for km in kalshi_markets:
+            k_data = json.loads(km.get("data", "{}"))
+            k_title = (k_data.get("title") or "").lower()
+            k_price = k_data.get("yes_price")
+            k_ticker = k_data.get("ticker", "UNKNOWN")
+
+            if not k_price or not k_title:
+                continue
+
+            k_words = set(re.findall(r'\b\w{4,}\b', k_title))
+
+            # Find matching Polymarket markets
+            for pm in poly_index:
+                # Calculate word overlap
+                common = k_words & pm["words"]
+                if len(common) < 3:
+                    continue
+
+                # Check for significant price difference
+                p_price = pm["price"]
+                diff = abs(k_price - p_price)
+
+                if diff >= 0.05:  # 5%+ difference
+                    edge = diff * 100
+                    higher = "Kalshi" if k_price > p_price else "Polymarket"
+                    lower = "Polymarket" if k_price > p_price else "Kalshi"
+
+                    # Determine action
+                    if k_price > p_price:
+                        action = "BUY_NO"  # Kalshi overpriced, buy NO
+                        reasoning = [
+                            f"Kalshi YES @ ${k_price:.2f} vs Polymarket @ ${p_price:.2f}",
+                            f"Kalshi is {diff*100:.1f}% higher - potential overpricing",
+                            f"Matching market: {pm['data'].get('question', '')[:50]}...",
+                        ]
+                    else:
+                        action = "BUY_YES"  # Kalshi underpriced, buy YES
+                        reasoning = [
+                            f"Kalshi YES @ ${k_price:.2f} vs Polymarket @ ${p_price:.2f}",
+                            f"Kalshi is {diff*100:.1f}% lower - potential value",
+                            f"Matching market: {pm['data'].get('question', '')[:50]}...",
+                        ]
+
+                    confidence = "HIGH" if diff >= 0.10 else "MEDIUM"
+
+                    recommendations.append(TradeRecommendation(
+                        ticker=k_ticker,
+                        title=k_data.get("title", ""),
+                        action=action,
+                        confidence=confidence,
+                        current_price=k_price,
+                        target_price=p_price,
+                        reasoning=reasoning,
+                        category="arbitrage",
+                        data_sources=["kalshi", "polymarket"],
+                        timestamp=now,
+                        edge=edge,
+                    ))
+                    break  # One match per Kalshi market
+
+        return recommendations[:10]  # Top 10 arb opportunities
+
+    def _analyze_economic_misalignment(self) -> list[TradeRecommendation]:
+        """Find markets where price doesn't align with economic data."""
+        recommendations = []
+        now = datetime.utcnow()
+
+        # Get indicators
+        indicators = {}
+        for ind in self.db.get_latest_indicators():
+            indicators[ind["series_id"]] = ind
+
+        if not indicators:
+            return recommendations
+
+        kalshi_markets = self.db.get_latest_markets(source="kalshi", limit=1000)
+
+        # Key economic thresholds
+        fed_rate = None
+        if "FEDFUNDS" in indicators:
+            ff_data = json.loads(indicators["FEDFUNDS"].get("data", "{}"))
+            fed_rate = ff_data.get("current_value")
+
+        unemployment = None
+        if "UNRATE" in indicators:
+            ur_data = json.loads(indicators["UNRATE"].get("data", "{}"))
+            unemployment = ur_data.get("current_value")
+
+        cpi_yoy = None
+        if "CPIAUCSL" in indicators:
+            cpi_data = json.loads(indicators["CPIAUCSL"].get("data", "{}"))
+            cpi_yoy = cpi_data.get("change_12_period", {}).get("percent")
+
+        for km in kalshi_markets:
+            k_data = json.loads(km.get("data", "{}"))
+            title = (k_data.get("title") or "").lower()
+            ticker = k_data.get("ticker", "UNKNOWN")
+            price = k_data.get("yes_price")
+
+            if not price:
                 continue
 
             reasoning = []
             action = "HOLD"
             confidence = "LOW"
+            edge = None
 
-            # High volume indicates liquid, active market
-            is_liquid = volume > 10000 or volume_24h > 1000
+            # Fed rate markets
+            if fed_rate and any(kw in title for kw in ["rate cut", "rate hike", "fomc", "federal reserve"]):
+                # Extract target rate from title if possible
+                rate_match = re.search(r'(\d+\.?\d*)%', title)
+                if rate_match:
+                    target_rate = float(rate_match.group(1))
 
-            # Extreme prices might indicate mispricing
-            # Very low prices (<15c) - potential value if you disagree with consensus
-            if price < 0.15 and is_liquid:
-                reasoning.append(f"Low price ${price:.2f} - market sees this as unlikely")
-                reasoning.append(f"Volume: {volume:,} contracts traded")
-                if volume_24h > 500:
-                    reasoning.append(f"Active trading: {volume_24h:,} in 24h")
-                action = "BUY_YES"  # Contrarian play
+                    if "cut" in title and fed_rate > target_rate:
+                        # Market expects cut, current rate is higher
+                        if price < 0.40:
+                            reasoning.append(f"Fed rate at {fed_rate:.2f}%, market sees cut to {target_rate}% as unlikely ({price*100:.0f}%)")
+                            reasoning.append("Fed has been cutting - momentum toward lower rates")
+                            action = "BUY_YES"
+                            confidence = "MEDIUM"
+                            edge = (0.50 - price) * 100
+
+            # Inflation markets
+            if cpi_yoy is not None and any(kw in title for kw in ["inflation", "cpi"]):
+                # Extract threshold from title
+                pct_match = re.search(r'(\d+\.?\d*)%', title)
+                if pct_match:
+                    threshold = float(pct_match.group(1))
+
+                    if "above" in title or "over" in title or "higher" in title:
+                        if cpi_yoy > threshold and price < 0.60:
+                            reasoning.append(f"CPI YoY at {cpi_yoy:.1f}%, already above {threshold}%")
+                            reasoning.append(f"Market only pricing {price*100:.0f}% chance - undervalued?")
+                            action = "BUY_YES"
+                            confidence = "MEDIUM"
+                            edge = (0.70 - price) * 100
+                        elif cpi_yoy < threshold and price > 0.50:
+                            reasoning.append(f"CPI YoY at {cpi_yoy:.1f}%, below {threshold}%")
+                            reasoning.append(f"Market pricing {price*100:.0f}% - overvalued?")
+                            action = "BUY_NO"
+                            confidence = "MEDIUM"
+                            edge = (price - 0.30) * 100
+
+                    elif "below" in title or "under" in title or "lower" in title:
+                        if cpi_yoy < threshold and price < 0.60:
+                            reasoning.append(f"CPI YoY at {cpi_yoy:.1f}%, already below {threshold}%")
+                            reasoning.append(f"Market only pricing {price*100:.0f}% chance - undervalued?")
+                            action = "BUY_YES"
+                            confidence = "MEDIUM"
+                            edge = (0.70 - price) * 100
+
+            # Unemployment markets
+            if unemployment is not None and any(kw in title for kw in ["unemployment", "jobless"]):
+                pct_match = re.search(r'(\d+\.?\d*)%', title)
+                if pct_match:
+                    threshold = float(pct_match.group(1))
+
+                    if "above" in title or "over" in title:
+                        if unemployment > threshold and price < 0.50:
+                            reasoning.append(f"Unemployment at {unemployment:.1f}%, already above {threshold}%")
+                            action = "BUY_YES"
+                            confidence = "MEDIUM"
+                            edge = (0.60 - price) * 100
+
+            if reasoning and action != "HOLD":
+                recommendations.append(TradeRecommendation(
+                    ticker=ticker,
+                    title=k_data.get("title", ""),
+                    action=action,
+                    confidence=confidence,
+                    current_price=price,
+                    target_price=None,
+                    reasoning=reasoning,
+                    category="economic_data",
+                    data_sources=["kalshi", "fred"],
+                    timestamp=now,
+                    edge=edge,
+                ))
+
+        return recommendations[:10]
+
+    def _analyze_volume_price_extremes(self) -> list[TradeRecommendation]:
+        """Find liquid markets with extreme prices."""
+        recommendations = []
+        now = datetime.utcnow()
+
+        kalshi_markets = self.db.get_latest_markets(source="kalshi", limit=1000)
+
+        for km in kalshi_markets:
+            k_data = json.loads(km.get("data", "{}"))
+            ticker = k_data.get("ticker", "UNKNOWN")
+            title = k_data.get("title", "")
+            price = k_data.get("yes_price")
+            volume = k_data.get("volume") or 0
+            volume_24h = k_data.get("volume_24h") or 0
+            open_interest = k_data.get("open_interest") or 0
+
+            if not price:
+                continue
+
+            # Require significant liquidity
+            is_liquid = volume > 50000 or (volume > 10000 and volume_24h > 2000)
+            is_very_liquid = volume > 100000 or volume_24h > 10000
+
+            if not is_liquid:
+                continue
+
+            reasoning = []
+            action = "HOLD"
+            confidence = "LOW"
+            edge = None
+
+            # Very low price with high volume = market confident it won't happen
+            if price <= 0.10 and is_very_liquid:
+                reasoning.append(f"Price ${price:.2f} - market says only {price*100:.0f}% chance")
+                reasoning.append(f"Very liquid: {volume:,} total / {volume_24h:,} 24h volume")
+                reasoning.append("Contrarian YES if you have edge the market is missing")
+                action = "BUY_YES"
                 confidence = "LOW"
+                edge = (0.20 - price) * 100  # If true probability is 20%
 
-            # Very high prices (>85c) - potential short if you disagree
-            elif price > 0.85 and is_liquid:
-                reasoning.append(f"High price ${price:.2f} - market sees this as very likely")
-                reasoning.append(f"Volume: {volume:,} contracts traded")
-                action = "BUY_NO"  # Contrarian play
+            # Very high price with high volume
+            elif price >= 0.90 and is_very_liquid:
+                reasoning.append(f"Price ${price:.2f} - market says {price*100:.0f}% likely")
+                reasoning.append(f"Very liquid: {volume:,} total / {volume_24h:,} 24h volume")
+                reasoning.append("Contrarian NO if you see risk the market is missing")
+                action = "BUY_NO"
                 confidence = "LOW"
+                edge = (price - 0.80) * 100  # If true probability is 80%
 
-            # Medium confidence: prices in uncertain range with high volume
-            elif 0.35 <= price <= 0.65 and volume_24h > 2000:
-                reasoning.append(f"Uncertain outcome (${price:.2f}) with high activity")
-                reasoning.append(f"24h volume: {volume_24h:,} - active trading")
-                reasoning.append("Market is undecided - research the fundamentals")
-                action = "HOLD"  # Flag for research
+            # Mid-range with unusual volume spike
+            elif 0.30 <= price <= 0.70 and volume_24h > 5000:
+                reasoning.append(f"Uncertain price ${price:.2f} with high activity")
+                reasoning.append(f"24h volume spike: {volume_24h:,} contracts")
+                reasoning.append("Something may be happening - research this market")
+                action = "HOLD"  # Flag for research, don't recommend action
                 confidence = "MEDIUM"
 
-            # Only add if we have meaningful reasoning
             if reasoning and action != "HOLD":
                 recommendations.append(TradeRecommendation(
                     ticker=ticker,
@@ -148,288 +366,153 @@ class StrategyGenerator:
                     current_price=price,
                     target_price=None,
                     reasoning=reasoning,
-                    category=market.get("category", "other"),
+                    category="volume_extreme",
                     data_sources=["kalshi"],
                     timestamp=now,
+                    edge=edge,
                 ))
 
-        # Sort by volume (most liquid first)
-        recommendations.sort(key=lambda x: -(x.current_price or 0))
+        # Sort by volume
+        recommendations.sort(key=lambda x: -(x.edge or 0))
+        return recommendations[:10]
 
-        return recommendations[:20]  # Top 20 opportunities
-
-    def _analyze_economic_markets(self) -> list[TradeRecommendation]:
-        """Analyze economic indicators vs market prices."""
+    def _analyze_expiring_markets(self) -> list[TradeRecommendation]:
+        """Find markets expiring soon with uncertain prices."""
         recommendations = []
         now = datetime.utcnow()
 
-        # Get latest indicators
-        indicators = {}
-        for ind in self.db.get_latest_indicators():
-            indicators[ind["series_id"]] = ind
+        kalshi_markets = self.db.get_latest_markets(source="kalshi", limit=1000)
 
-        # Get Polymarket economics markets (since Kalshi might not be available)
-        markets = self.db.get_latest_markets(category="economics", limit=100)
+        for km in kalshi_markets:
+            k_data = json.loads(km.get("data", "{}"))
+            ticker = k_data.get("ticker", "UNKNOWN")
+            title = k_data.get("title", "")
+            price = k_data.get("yes_price")
+            close_time = k_data.get("close_time") or k_data.get("expiration_time")
 
-        # Also check all markets for economic keywords
-        all_markets = self.db.get_latest_markets(limit=500)
+            if not price or not close_time:
+                continue
 
-        for market in all_markets:
-            data = json.loads(market.get("data", "{}"))
-            title = (data.get("title") or data.get("question") or "").lower()
-            ticker = market.get("ticker") or data.get("condition_id") or "UNKNOWN"
+            # Parse close time
+            try:
+                if isinstance(close_time, str):
+                    # Handle ISO format
+                    close_dt = datetime.fromisoformat(close_time.replace('Z', '+00:00').replace('+00:00', ''))
+                else:
+                    continue
+            except:
+                continue
 
-            price = data.get("yes_price")
-            if not price:
-                prices = data.get("prices", {})
-                price = prices.get("Yes") or prices.get("yes")
+            # Check if expiring within 7 days
+            days_to_expiry = (close_dt - now).days
+            if days_to_expiry < 0 or days_to_expiry > 7:
+                continue
 
-            reasoning = []
-            action = "HOLD"
-            confidence = "LOW"
-            sources = [market.get("source", "unknown")]
+            # Look for uncertain prices on soon-expiring markets
+            if 0.20 <= price <= 0.80:
+                reasoning = [
+                    f"Expires in {days_to_expiry} days with uncertain price ${price:.2f}",
+                    "Market still undecided close to resolution",
+                    "High potential for price movement before expiry",
+                ]
 
-            # CPI / Inflation markets
-            if any(kw in title for kw in ["inflation", "cpi", "consumer price"]):
-                cpi = indicators.get("CPIAUCSL")
-                core_cpi = indicators.get("CPILFESL")
-
-                if cpi:
-                    cpi_data = json.loads(cpi.get("data", "{}"))
-                    yoy_change = cpi_data.get("change_12_period", {}).get("percent")
-
-                    if yoy_change is not None:
-                        sources.append("FRED:CPIAUCSL")
-                        if yoy_change > 3.5:
-                            reasoning.append(f"CPI YoY at {yoy_change:.1f}% - elevated inflation")
-                            if "above" in title or "higher" in title:
-                                action = "BUY_YES"
-                                confidence = "MEDIUM"
-                            elif "below" in title or "lower" in title:
-                                action = "BUY_NO"
-                                confidence = "MEDIUM"
-                        elif yoy_change < 2.5:
-                            reasoning.append(f"CPI YoY at {yoy_change:.1f}% - inflation cooling")
-                            if "below" in title or "lower" in title:
-                                action = "BUY_YES"
-                                confidence = "MEDIUM"
-
-            # Fed Rate markets - be specific to avoid matching "federal spending" etc.
-            elif any(kw in title for kw in ["fomc", "interest rate", "rate cut", "rate hike", "federal reserve", "fed funds", "fed rate"]) or ("fed" in title.split() and "federal spending" not in title):
-                fed_funds = indicators.get("FEDFUNDS")
-                t10y2y = indicators.get("T10Y2Y")
-
-                if fed_funds:
-                    ff_data = json.loads(fed_funds.get("data", "{}"))
-                    ff_change = ff_data.get("change_1_period", {}).get("absolute")
-                    current_rate = ff_data.get("current_value")
-
-                    sources.append("FRED:FEDFUNDS")
-                    if current_rate:
-                        reasoning.append(f"Fed Funds currently at {current_rate:.2f}%")
-
-                    if ff_change and ff_change < -0.2:
-                        reasoning.append("Recent rate cut detected")
-                        if "cut" in title:
-                            action = "BUY_YES"
-                            confidence = "MEDIUM"
-
-                if t10y2y:
-                    spread_data = json.loads(t10y2y.get("data", "{}"))
-                    spread = spread_data.get("current_value")
-                    if spread is not None and spread < 0:
-                        reasoning.append(f"Yield curve inverted ({spread:.2f}%) - recession signal")
-                        sources.append("FRED:T10Y2Y")
-
-            # Unemployment markets
-            elif any(kw in title for kw in ["unemployment", "jobless", "jobs report", "payroll"]):
-                unrate = indicators.get("UNRATE")
-                claims = indicators.get("ICSA")
-
-                if unrate:
-                    ur_data = json.loads(unrate.get("data", "{}"))
-                    current_ur = ur_data.get("current_value")
-                    ur_change = ur_data.get("change_1_period", {}).get("absolute")
-
-                    if current_ur:
-                        sources.append("FRED:UNRATE")
-                        reasoning.append(f"Unemployment at {current_ur:.1f}%")
-
-                        if current_ur < 4.0:
-                            reasoning.append("Labor market tight")
-                            if "below" in title or "under" in title:
-                                action = "BUY_YES"
-                                confidence = "MEDIUM"
-                        elif current_ur > 5.0:
-                            reasoning.append("Labor market weakening")
-                            if "above" in title or "over" in title:
-                                action = "BUY_YES"
-                                confidence = "MEDIUM"
-
-            # GDP markets
-            elif any(kw in title for kw in ["gdp", "recession", "economic growth"]):
-                gdp = indicators.get("GDPC1")
-
-                if gdp:
-                    gdp_data = json.loads(gdp.get("data", "{}"))
-                    gdp_change = gdp_data.get("change_1_period", {}).get("percent")
-
-                    if gdp_change is not None:
-                        sources.append("FRED:GDPC1")
-                        if gdp_change < 0:
-                            reasoning.append(f"GDP contracted {gdp_change:.1f}%")
-                            if "recession" in title:
-                                action = "BUY_YES"
-                                confidence = "MEDIUM"
-                        elif gdp_change > 2:
-                            reasoning.append(f"GDP growing at {gdp_change:.1f}%")
-                            if "recession" in title:
-                                action = "BUY_NO"
-                                confidence = "LOW"
-
-            if reasoning and action != "HOLD":
                 recommendations.append(TradeRecommendation(
                     ticker=ticker,
-                    title=data.get("title") or data.get("question", ""),
-                    action=action,
-                    confidence=confidence,
+                    title=title,
+                    action="HOLD",  # Research opportunity
+                    confidence="MEDIUM",
                     current_price=price,
                     target_price=None,
                     reasoning=reasoning,
-                    category="economics",
-                    data_sources=sources,
+                    category="expiring_soon",
+                    data_sources=["kalshi"],
                     timestamp=now,
+                    edge=None,
                 ))
 
-        return recommendations
+        return recommendations[:5]
 
-    def _analyze_arbitrage(self) -> list[TradeRecommendation]:
-        """Find arbitrage between Kalshi and Polymarket."""
+    def _analyze_news_momentum(self) -> list[TradeRecommendation]:
+        """Find markets with relevant recent news."""
         recommendations = []
         now = datetime.utcnow()
 
-        kalshi_markets = {
-            m["ticker"]: m for m in self.db.get_latest_markets(source="kalshi")
-            if m.get("ticker")
-        }
-        poly_markets = self.db.get_latest_markets(source="polymarket", limit=300)
+        # Get recent news
+        news = self.db.get_recent_news(hours=24, limit=200)
+        if not news:
+            return recommendations
 
-        # Look for similar markets with price discrepancies
-        for poly in poly_markets:
-            p_data = json.loads(poly.get("data", "{}"))
-            p_question = (p_data.get("question") or "").lower()
-            p_prices = p_data.get("prices", {})
-            p_price = p_prices.get("Yes") or p_prices.get("yes")
-
-            if not p_price or not p_question:
-                continue
-
-            # Search for matching Kalshi markets
-            for k_ticker, kalshi in kalshi_markets.items():
-                k_data = json.loads(kalshi.get("data", "{}"))
-                k_title = (k_data.get("title") or "").lower()
-                k_price = k_data.get("yes_price")
-
-                if not k_price:
-                    continue
-
-                # Check for similar topics
-                common_words = set(p_question.split()) & set(k_title.split())
-                significant_words = [w for w in common_words if len(w) > 4]
-
-                if len(significant_words) >= 3:  # At least 3 significant matching words
-                    price_diff = abs(k_price - p_price)
-
-                    if price_diff >= 0.05:  # 5% or more difference
-                        higher_platform = "Kalshi" if k_price > p_price else "Polymarket"
-                        lower_platform = "Polymarket" if k_price > p_price else "Kalshi"
-
-                        recommendations.append(TradeRecommendation(
-                            ticker=k_ticker,
-                            title=k_data.get("title", ""),
-                            action="BUY_YES" if k_price < p_price else "BUY_NO",
-                            confidence="HIGH" if price_diff >= 0.10 else "MEDIUM",
-                            current_price=k_price,
-                            target_price=p_price,
-                            reasoning=[
-                                f"Price discrepancy: {higher_platform} @ ${max(k_price, p_price):.2f} vs {lower_platform} @ ${min(k_price, p_price):.2f}",
-                                f"Potential {price_diff*100:.1f}% arbitrage opportunity",
-                                f"Similar market on Polymarket: {p_data.get('question', '')[:50]}...",
-                            ],
-                            category="arbitrage",
-                            data_sources=["kalshi", "polymarket"],
-                            timestamp=now,
-                        ))
-
-        return recommendations
-
-    def _analyze_news_catalysts(self) -> list[TradeRecommendation]:
-        """Find markets affected by recent news."""
-        recommendations = []
-        now = datetime.utcnow()
-
-        # Get recent news with important keywords
-        news = self.db.get_recent_news(hours=12, limit=200)
-        markets = self.db.get_latest_markets(limit=500)
-
-        # Keywords that suggest market-moving news
-        catalyst_keywords = {
-            "fed": ["fed", "fomc", "powell", "interest rate"],
-            "inflation": ["inflation", "cpi", "prices", "consumer"],
-            "jobs": ["jobs", "employment", "unemployment", "payroll", "labor"],
-            "election": ["election", "vote", "poll", "candidate", "trump", "biden"],
-            "tech": ["tesla", "musk", "apple", "google", "ai", "nvidia"],
-        }
-
-        # Count keyword mentions in recent news
-        keyword_counts = {cat: 0 for cat in catalyst_keywords}
-        keyword_headlines = {cat: [] for cat in catalyst_keywords}
+        # Build keyword frequency
+        keyword_news = {}
+        important_keywords = [
+            "trump", "biden", "election", "fed", "inflation", "recession",
+            "tesla", "musk", "bitcoin", "crypto", "ai", "nvidia",
+            "ukraine", "russia", "china", "war", "tariff",
+        ]
 
         for item in news:
             title = (item.get("title") or "").lower()
-            content = (item.get("content") or "").lower()
-            text = f"{title} {content}"
+            for kw in important_keywords:
+                if kw in title:
+                    if kw not in keyword_news:
+                        keyword_news[kw] = []
+                    keyword_news[kw].append(item.get("title", "")[:80])
 
-            for category, keywords in catalyst_keywords.items():
-                if any(kw in text for kw in keywords):
-                    keyword_counts[category] += 1
-                    if title and len(keyword_headlines[category]) < 3:
-                        keyword_headlines[category].append(item.get("title", "")[:80])
+        # Find markets related to trending topics
+        kalshi_markets = self.db.get_latest_markets(source="kalshi", limit=1000)
 
-        # Find markets related to trending news topics
-        for market in markets:
-            data = json.loads(market.get("data", "{}"))
-            title = (data.get("title") or data.get("question") or "").lower()
-            ticker = market.get("ticker") or data.get("condition_id") or "UNKNOWN"
+        for km in kalshi_markets:
+            k_data = json.loads(km.get("data", "{}"))
+            ticker = k_data.get("ticker", "UNKNOWN")
+            title = (k_data.get("title") or "").lower()
+            price = k_data.get("yes_price")
+            volume_24h = k_data.get("volume_24h") or 0
 
-            price = data.get("yes_price")
             if not price:
-                prices = data.get("prices", {})
-                price = prices.get("Yes") or prices.get("yes")
+                continue
 
-            for category, keywords in catalyst_keywords.items():
-                if keyword_counts[category] >= 3:  # Significant news volume
-                    if any(kw in title for kw in keywords):
-                        recommendations.append(TradeRecommendation(
-                            ticker=ticker,
-                            title=data.get("title") or data.get("question", ""),
-                            action="HOLD",  # News-based, needs manual review
-                            confidence="LOW",
-                            current_price=price,
-                            target_price=None,
-                            reasoning=[
-                                f"High news volume ({keyword_counts[category]} articles) for '{category}'",
-                                "Recent headlines:",
-                                *[f"  • {h}" for h in keyword_headlines[category]],
-                                "Review news before trading - catalyst detected",
-                            ],
-                            category="news_catalyst",
-                            data_sources=["rss_feeds", market.get("source", "unknown")],
-                            timestamp=now,
-                        ))
-                        break  # One recommendation per market
+            # Check for keyword matches
+            for kw, headlines in keyword_news.items():
+                if len(headlines) >= 3 and kw in title:  # At least 3 news articles
+                    reasoning = [
+                        f"High news volume: {len(headlines)} articles mentioning '{kw}'",
+                        f"Recent headlines:",
+                    ]
+                    for h in headlines[:3]:
+                        reasoning.append(f"  • {h}")
 
-        return recommendations
+                    if volume_24h > 1000:
+                        reasoning.append(f"Active trading: {volume_24h:,} contracts in 24h")
+
+                    recommendations.append(TradeRecommendation(
+                        ticker=ticker,
+                        title=k_data.get("title", ""),
+                        action="HOLD",  # News-based, needs research
+                        confidence="LOW",
+                        current_price=price,
+                        target_price=None,
+                        reasoning=reasoning,
+                        category="news_momentum",
+                        data_sources=["kalshi", "rss"],
+                        timestamp=now,
+                        edge=None,
+                    ))
+                    break
+
+        return recommendations[:5]
+
+    def get_top_picks(self, n: int = 10) -> list[TradeRecommendation]:
+        """Get top N actionable recommendations."""
+        recs = self.generate_recommendations()
+        # Filter to actionable (BUY_YES or BUY_NO)
+        actionable = [r for r in recs if r.action in ("BUY_YES", "BUY_NO")]
+        return actionable[:n]
+
+    def get_research_opportunities(self, n: int = 10) -> list[TradeRecommendation]:
+        """Get markets worth researching (HOLD recommendations)."""
+        recs = self.generate_recommendations()
+        research = [r for r in recs if r.action == "HOLD"]
+        return research[:n]
 
     def print_strategy_report(self) -> str:
         """Generate a formatted strategy report."""
@@ -443,54 +526,69 @@ class StrategyGenerator:
             "",
         ]
 
-        # Summary
-        action_counts = {}
-        for rec in recommendations:
-            action_counts[rec.action] = action_counts.get(rec.action, 0) + 1
+        # Get data summary
+        kalshi_count = len(self.db.get_latest_markets(source="kalshi", limit=10000))
+        poly_count = len(self.db.get_latest_markets(source="polymarket", limit=10000))
+        indicator_count = len(self.db.get_latest_indicators())
+        news_count = len(self.db.get_recent_news(hours=24))
 
-        lines.append("SUMMARY")
+        lines.append("DATA SOURCES")
         lines.append("-" * 40)
-        for action, count in sorted(action_counts.items()):
-            lines.append(f"  {action}: {count}")
+        lines.append(f"  Kalshi markets: {kalshi_count}")
+        lines.append(f"  Polymarket markets: {poly_count}")
+        lines.append(f"  Economic indicators: {indicator_count}")
+        lines.append(f"  News articles (24h): {news_count}")
         lines.append("")
 
-        # Group by category
+        # Summary by category
         categories = {}
         for rec in recommendations:
-            if rec.category not in categories:
-                categories[rec.category] = []
-            categories[rec.category].append(rec)
+            cat = rec.category
+            if cat not in categories:
+                categories[cat] = {"BUY_YES": 0, "BUY_NO": 0, "HOLD": 0}
+            categories[cat][rec.action] = categories[cat].get(rec.action, 0) + 1
 
-        for category, recs in categories.items():
-            lines.append(f"\n{'='*30} {category.upper()} {'='*30}")
+        lines.append("OPPORTUNITIES BY CATEGORY")
+        lines.append("-" * 40)
+        for cat, actions in categories.items():
+            total = sum(actions.values())
+            lines.append(f"  {cat}: {total} ({actions.get('BUY_YES', 0)} YES, {actions.get('BUY_NO', 0)} NO, {actions.get('HOLD', 0)} research)")
+        lines.append("")
+
+        # Top picks
+        top_picks = self.get_top_picks(10)
+        if top_picks:
+            lines.append("=" * 30 + " TOP PICKS " + "=" * 30)
             lines.append("")
 
-            for rec in recs[:10]:  # Top 10 per category
-                confidence_symbol = {"HIGH": "★★★", "MEDIUM": "★★☆", "LOW": "★☆☆"}.get(rec.confidence, "☆☆☆")
-                action_symbol = {"BUY_YES": "🟢 BUY YES", "BUY_NO": "🔴 BUY NO", "HOLD": "🟡 WATCH", "AVOID": "⚫ AVOID"}.get(rec.action, rec.action)
+            for i, rec in enumerate(top_picks, 1):
+                conf = {"HIGH": "★★★", "MEDIUM": "★★☆", "LOW": "★☆☆"}.get(rec.confidence, "?")
+                action = {"BUY_YES": "🟢 BUY YES", "BUY_NO": "🔴 BUY NO"}.get(rec.action, rec.action)
+                edge_str = f" | Edge: {rec.edge:+.1f}%" if rec.edge else ""
 
-                lines.append(f"{confidence_symbol} {action_symbol}")
+                lines.append(f"{i}. {conf} {action} @ ${rec.current_price:.2f}{edge_str}")
                 lines.append(f"   Ticker: {rec.ticker}")
-                lines.append(f"   Market: {rec.title[:65]}...")
-                if rec.current_price:
-                    lines.append(f"   Price:  ${rec.current_price:.2f}")
-                if rec.target_price:
-                    lines.append(f"   Target: ${rec.target_price:.2f}")
-                lines.append("   Reasoning:")
-                for reason in rec.reasoning:
-                    lines.append(f"      • {reason}")
-                lines.append(f"   Sources: {', '.join(rec.data_sources)}")
+                lines.append(f"   Market: {rec.title[:60]}...")
+                lines.append(f"   Category: {rec.category}")
+                for reason in rec.reasoning[:3]:
+                    lines.append(f"   → {reason}")
+                lines.append("")
+
+        # Research opportunities
+        research = self.get_research_opportunities(5)
+        if research:
+            lines.append("=" * 25 + " RESEARCH OPPORTUNITIES " + "=" * 25)
+            lines.append("")
+
+            for rec in research:
+                lines.append(f"📊 {rec.ticker} @ ${rec.current_price:.2f}")
+                lines.append(f"   {rec.title[:60]}...")
+                for reason in rec.reasoning[:2]:
+                    lines.append(f"   → {reason}")
                 lines.append("")
 
         lines.append("=" * 70)
-        lines.append("DISCLAIMER: This is not financial advice. Do your own research.")
+        lines.append("DISCLAIMER: Not financial advice. Do your own research.")
         lines.append("=" * 70)
 
         return "\n".join(lines)
-
-    def get_top_picks(self, n: int = 5) -> list[TradeRecommendation]:
-        """Get top N recommendations by confidence."""
-        recs = self.generate_recommendations()
-        # Filter to actionable (not HOLD)
-        actionable = [r for r in recs if r.action in ("BUY_YES", "BUY_NO")]
-        return actionable[:n]
