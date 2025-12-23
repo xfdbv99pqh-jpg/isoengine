@@ -1,7 +1,8 @@
-"""Polling data aggregator for 538, RealClearPolitics, etc."""
+"""Polling data aggregator for 270toWin, RCP, and election data."""
 
 import logging
 import re
+import json
 from datetime import datetime
 from typing import Optional
 from bs4 import BeautifulSoup
@@ -15,18 +16,28 @@ logger = logging.getLogger(__name__)
 class PollingCrawler(BaseCrawler):
     """Crawler for polling aggregator data."""
 
-    # RealClearPolitics URLs
-    RCP_BASE = "https://www.realclearpolling.com"
-    RCP_POLLS = {
-        "president_approval": "/polls/approval/president/",
-        "generic_ballot": "/polls/other/generic_congressional_vote/",
-    }
-
-    # 538 URLs
-    FIVE38_BASE = "https://projects.fivethirtyeight.com"
-    FIVE38_POLLS = {
-        "president_approval": "/biden-approval-rating/",
-        "generic_ballot": "/2024-election-forecast/",
+    # Working polling data sources
+    SOURCES = {
+        "270towin": {
+            "base": "https://www.270towin.com",
+            "endpoints": {
+                "polls": "/2024-presidential-election-polls/",
+                "map": "/maps/consensus-2024-electoral-map-702",
+            }
+        },
+        "rcp": {
+            "base": "https://www.realclearpolling.com",
+            "endpoints": {
+                "president": "/latest-polls/president/",
+                "elections": "/elections/",
+            }
+        },
+        "silver_bulletin": {
+            "base": "https://www.natesilver.net",
+            "endpoints": {
+                "forecast": "/",
+            }
+        }
     }
 
     def __init__(self, config: CrawlerConfig):
@@ -38,180 +49,171 @@ class PollingCrawler(BaseCrawler):
             user_agent=config.user_agent,
         )
         self.config = config
-        self.sources = config.polling_sources
 
     def is_available(self) -> bool:
         """Polling sources are publicly available."""
         return True
 
-    def _scrape_rcp(self, poll_type: str) -> Optional[dict]:
-        """Scrape RealClearPolitics for poll data."""
-        if poll_type not in self.RCP_POLLS:
-            return None
-
-        url = f"{self.RCP_BASE}{self.RCP_POLLS[poll_type]}"
+    def _scrape_270towin(self) -> list[dict]:
+        """Scrape 270toWin for electoral data."""
+        results = []
+        base = self.SOURCES["270towin"]["base"]
 
         try:
+            # Get consensus electoral map
+            url = f"{base}/maps/consensus-2024-electoral-map-702"
             response = self.get(url)
             soup = BeautifulSoup(response.text, "html.parser")
 
-            # RCP typically shows averages in tables or specific divs
-            # This is a simplified scraper - actual implementation would need
-            # to adapt to RCP's current HTML structure
-
+            # Look for electoral vote counts
             result = {
-                "source": "rcp",
-                "poll_type": poll_type,
+                "source": "270towin",
+                "poll_type": "electoral_map",
                 "url": url,
                 "scraped_at": datetime.utcnow().isoformat(),
             }
 
-            # Look for polling average tables
-            tables = soup.find_all("table", class_=re.compile(r"poll|data|average", re.I))
-            if tables:
-                result["has_data"] = True
-                # Parse table data here
-            else:
-                result["has_data"] = False
+            # Try to find vote counts in the page
+            # 270towin typically has these in specific elements
+            dem_votes = soup.find(class_=re.compile(r"dem|democratic|blue", re.I))
+            rep_votes = soup.find(class_=re.compile(r"rep|republican|red", re.I))
 
-            return result
+            if dem_votes:
+                result["dem_text"] = dem_votes.get_text(strip=True)[:100]
+            if rep_votes:
+                result["rep_text"] = rep_votes.get_text(strip=True)[:100]
 
-        except Exception as e:
-            logger.error(f"RCP scrape failed for {poll_type}: {e}")
-            return None
-
-    def _scrape_538_averages(self) -> list[dict]:
-        """Scrape 538 for polling averages."""
-        results = []
-
-        try:
-            # 538 often has data in JSON format in script tags or API endpoints
-            # Try the approval rating page
-            url = f"{self.FIVE38_BASE}/biden-approval-rating/"
-            response = self.get(url)
-
-            # Look for JSON data embedded in the page
-            soup = BeautifulSoup(response.text, "html.parser")
-
-            # 538 typically embeds data in script tags with type="application/json"
-            scripts = soup.find_all("script", type="application/json")
-            for script in scripts:
-                try:
-                    import json
-                    data = json.loads(script.string)
-                    if isinstance(data, dict):
-                        results.append({
-                            "source": "538",
-                            "data_type": "embedded_json",
-                            "data": data,
-                        })
-                except (json.JSONDecodeError, TypeError):
-                    continue
-
-            # Also look for data attributes
-            data_elements = soup.find_all(attrs={"data-json": True})
-            for elem in data_elements:
-                try:
-                    import json
-                    data = json.loads(elem.get("data-json", "{}"))
-                    results.append({
-                        "source": "538",
-                        "data_type": "data_attribute",
-                        "data": data,
-                    })
-                except (json.JSONDecodeError, TypeError):
-                    continue
+            results.append(result)
 
         except Exception as e:
-            logger.error(f"538 scrape failed: {e}")
+            logger.error(f"270toWin scrape failed: {e}")
 
         return results
 
-    def get_polling_summary(self) -> dict:
-        """Get a summary of current polling data."""
-        summary = {
-            "timestamp": datetime.utcnow().isoformat(),
-            "sources": {},
-        }
+    def _scrape_rcp_latest(self) -> list[dict]:
+        """Scrape RealClearPolling latest polls page."""
+        results = []
+        base = self.SOURCES["rcp"]["base"]
 
-        if "rcp" in self.sources:
-            rcp_data = {}
-            for poll_type in self.RCP_POLLS.keys():
-                result = self._scrape_rcp(poll_type)
-                if result:
-                    rcp_data[poll_type] = result
-            summary["sources"]["rcp"] = rcp_data
+        try:
+            url = f"{base}/elections/"
+            response = self.get(url)
+            soup = BeautifulSoup(response.text, "html.parser")
 
-        if "538" in self.sources:
-            summary["sources"]["538"] = self._scrape_538_averages()
+            result = {
+                "source": "rcp",
+                "poll_type": "latest_polls",
+                "url": url,
+                "scraped_at": datetime.utcnow().isoformat(),
+            }
 
-        return summary
+            # Look for poll data in tables or lists
+            tables = soup.find_all("table")
+            poll_data = []
+
+            for table in tables[:3]:  # First 3 tables
+                rows = table.find_all("tr")
+                for row in rows[:10]:  # First 10 rows
+                    cells = row.find_all(["td", "th"])
+                    if cells:
+                        row_text = " | ".join(c.get_text(strip=True)[:50] for c in cells[:5])
+                        if row_text.strip():
+                            poll_data.append(row_text)
+
+            result["poll_data"] = poll_data[:20]  # Limit to 20 rows
+            result["has_data"] = len(poll_data) > 0
+            results.append(result)
+
+        except Exception as e:
+            logger.error(f"RCP scrape failed: {e}")
+
+        return results
+
+    def _get_election_json_feeds(self) -> list[dict]:
+        """Try to get election data from JSON APIs."""
+        results = []
+
+        # Some sites expose JSON endpoints
+        json_endpoints = [
+            "https://projects.fivethirtyeight.com/polls/president-general/2024/polls.json",
+            "https://cdn.split.io/api/splitChanges",
+        ]
+
+        for url in json_endpoints:
+            try:
+                response = self.get(url)
+                if response.headers.get("content-type", "").startswith("application/json"):
+                    data = response.json()
+                    results.append({
+                        "source": "json_feed",
+                        "url": url,
+                        "data": data if isinstance(data, dict) else {"items": data[:50]},
+                        "scraped_at": datetime.utcnow().isoformat(),
+                    })
+            except Exception:
+                continue  # Skip failed endpoints silently
+
+        return results
 
     def crawl(self) -> list[CrawlResult]:
-        """Crawl all configured polling sources."""
+        """Crawl all polling sources."""
         results = []
         now = datetime.utcnow()
 
-        # RCP data
-        if "rcp" in self.sources:
-            for poll_type in self.RCP_POLLS.keys():
-                try:
-                    rcp_data = self._scrape_rcp(poll_type)
-                    if rcp_data:
-                        result = CrawlResult(
-                            source="polling_rcp",
-                            category="politics",
-                            data_type="poll",
-                            timestamp=now,
-                            data={
-                                "poll_type": poll_type,
-                                "source_name": "RealClearPolitics",
-                                **rcp_data,
-                            },
-                            metadata={"url": rcp_data.get("url")},
-                        )
-                        results.append(result)
-                except Exception as e:
-                    logger.error(f"RCP crawl failed for {poll_type}: {e}")
-                    self.error_count += 1
+        # 270toWin
+        try:
+            for item in self._scrape_270towin():
+                results.append(CrawlResult(
+                    source="polling_270towin",
+                    category="politics",
+                    data_type="poll",
+                    timestamp=now,
+                    data=item,
+                    metadata={"url": item.get("url")},
+                ))
+        except Exception as e:
+            logger.error(f"270toWin crawl failed: {e}")
+            self.error_count += 1
 
-        # 538 data
-        if "538" in self.sources:
-            try:
-                five38_data = self._scrape_538_averages()
-                for item in five38_data:
-                    result = CrawlResult(
-                        source="polling_538",
-                        category="politics",
-                        data_type="poll",
-                        timestamp=now,
-                        data={
-                            "source_name": "FiveThirtyEight",
-                            **item,
-                        },
-                        metadata={},
-                    )
-                    results.append(result)
-            except Exception as e:
-                logger.error(f"538 crawl failed: {e}")
-                self.error_count += 1
+        # RCP
+        try:
+            for item in self._scrape_rcp_latest():
+                results.append(CrawlResult(
+                    source="polling_rcp",
+                    category="politics",
+                    data_type="poll",
+                    timestamp=now,
+                    data=item,
+                    metadata={"url": item.get("url")},
+                ))
+        except Exception as e:
+            logger.error(f"RCP crawl failed: {e}")
+            self.error_count += 1
+
+        # JSON feeds
+        try:
+            for item in self._get_election_json_feeds():
+                results.append(CrawlResult(
+                    source="polling_json",
+                    category="politics",
+                    data_type="poll",
+                    timestamp=now,
+                    data=item,
+                    metadata={"url": item.get("url")},
+                ))
+        except Exception as e:
+            logger.error(f"JSON feed crawl failed: {e}")
+            self.error_count += 1
 
         self.last_crawl = now
         logger.info(f"Polling crawl complete: {len(results)} results")
         return results
 
-    def search_polls(self, topic: str) -> list[dict]:
-        """Search for polls on a specific topic."""
-        # This would expand to search various polling sources
-        results = []
-
-        # For now, return crawl results filtered by topic
-        all_results = self.crawl()
-        topic_lower = topic.lower()
-
-        for result in all_results:
-            data_str = str(result.data).lower()
-            if topic_lower in data_str:
-                results.append(result.data)
-
-        return results
+    def get_polling_summary(self) -> dict:
+        """Get a summary of current polling data."""
+        results = self.crawl()
+        return {
+            "timestamp": datetime.utcnow().isoformat(),
+            "sources_crawled": len(results),
+            "data": [r.data for r in results],
+        }

@@ -11,6 +11,7 @@ from .config import CrawlerConfig
 from .base import BaseCrawler, CrawlResult
 from .storage.db import CrawlerDatabase
 from .analysis.signals import SignalAnalyzer
+from .analysis.strategy import StrategyGenerator
 from .sources import (
     KalshiCrawler,
     FredCrawler,
@@ -29,6 +30,7 @@ class CrawlerRunner:
         self.config = config or CrawlerConfig.from_env()
         self.db = CrawlerDatabase(self.config.db_path)
         self.analyzer = SignalAnalyzer(self.db)
+        self.strategy = StrategyGenerator(self.db)
 
         # Initialize crawlers
         self.crawlers: dict[str, BaseCrawler] = {}
@@ -227,6 +229,35 @@ class CrawlerRunner:
                 for s in signals:
                     print(f"  {s}")
 
+            def do_strategy(self, arg):
+                """Generate investment strategy report: strategy [picks]"""
+                if arg == "picks":
+                    picks = runner.strategy.get_top_picks(10)
+                    print(f"\nTOP {len(picks)} PICKS:")
+                    print("-" * 50)
+                    for pick in picks:
+                        print(pick)
+                        print()
+                else:
+                    print(runner.strategy.print_strategy_report())
+
+            def do_picks(self, arg):
+                """Show top trading picks: picks [number]"""
+                n = int(arg) if arg else 5
+                picks = runner.strategy.get_top_picks(n)
+                print(f"\n{'='*60}")
+                print(f"TOP {len(picks)} KALSHI PICKS")
+                print(f"{'='*60}\n")
+                for i, pick in enumerate(picks, 1):
+                    conf = {"HIGH": "★★★", "MEDIUM": "★★☆", "LOW": "★☆☆"}.get(pick.confidence, "?")
+                    action = {"BUY_YES": "🟢 YES", "BUY_NO": "🔴 NO"}.get(pick.action, pick.action)
+                    print(f"{i}. {conf} {action} @ ${pick.current_price:.2f}" if pick.current_price else f"{i}. {conf} {action}")
+                    print(f"   {pick.ticker}")
+                    print(f"   {pick.title[:55]}...")
+                    for r in pick.reasoning[:2]:
+                        print(f"   → {r}")
+                    print()
+
             def do_quit(self, arg):
                 """Exit the shell"""
                 return True
@@ -251,6 +282,8 @@ def main():
     parser.add_argument("--source", type=str, help="Run specific source only")
     parser.add_argument("--shell", action="store_true", help="Start interactive shell")
     parser.add_argument("--status", action="store_true", help="Show status and exit")
+    parser.add_argument("--strategy", action="store_true", help="Generate investment strategy report")
+    parser.add_argument("--picks", type=int, metavar="N", help="Show top N trading picks")
     args = parser.parse_args()
 
     runner = CrawlerRunner()
@@ -258,6 +291,23 @@ def main():
     if args.status:
         import json
         print(json.dumps(runner.get_status(), indent=2, default=str))
+    elif args.strategy:
+        print(runner.strategy.print_strategy_report())
+    elif args.picks:
+        picks = runner.strategy.get_top_picks(args.picks)
+        print(f"\n{'='*60}")
+        print(f"TOP {len(picks)} KALSHI PICKS")
+        print(f"{'='*60}\n")
+        for i, pick in enumerate(picks, 1):
+            conf = {"HIGH": "★★★", "MEDIUM": "★★☆", "LOW": "★☆☆"}.get(pick.confidence, "?")
+            action = {"BUY_YES": "🟢 YES", "BUY_NO": "🔴 NO"}.get(pick.action, pick.action)
+            price_str = f" @ ${pick.current_price:.2f}" if pick.current_price else ""
+            print(f"{i}. {conf} {action}{price_str}")
+            print(f"   {pick.ticker}")
+            print(f"   {pick.title[:55]}...")
+            for r in pick.reasoning[:2]:
+                print(f"   → {r}")
+            print()
     elif args.shell:
         runner.interactive_shell()
     elif args.source:
