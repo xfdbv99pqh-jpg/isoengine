@@ -335,23 +335,22 @@ class StrategyGenerator:
             if price <= 0.02 or price >= 0.98:
                 continue
 
-            # Skip far-future markets (more than 90 days out) - not actionable
+            # Calculate days to expiry if available
+            days_to_expiry = None
             if close_time:
                 try:
                     if isinstance(close_time, str):
                         close_dt = datetime.fromisoformat(close_time.replace('Z', '+00:00').replace('+00:00', ''))
                         days_to_expiry = (close_dt - now).days
-                        if days_to_expiry > 90:
-                            continue
                 except:
                     pass
 
-            # Require RECENT activity, not just historical volume
-            has_recent_activity = volume_24h >= 100
-            is_active = volume_24h >= 1000
-            is_very_active = volume_24h >= 5000
+            # Require some activity
+            has_activity = volume_24h >= 100 or volume > 10000
+            is_active = volume_24h >= 500
+            is_very_active = volume_24h >= 3000
 
-            if not has_recent_activity:
+            if not has_activity:
                 continue
 
             reasoning = []
@@ -359,23 +358,32 @@ class StrategyGenerator:
             confidence = "LOW"
             edge = None
 
-            # Moderately low price (5-15%) with recent activity - potential value
-            if 0.05 <= price <= 0.15 and is_active:
+            # Prefer near-term markets (bonus for <30 days)
+            near_term_bonus = days_to_expiry is not None and days_to_expiry <= 30
+
+            # Low price (3-20%) with activity - potential value
+            if 0.03 <= price <= 0.20 and is_active:
                 reasoning.append(f"Price ${price:.2f} - market says {price*100:.0f}% chance")
                 reasoning.append(f"Active trading: {volume_24h:,} contracts in 24h")
-                reasoning.append("Low price with activity suggests potential opportunity")
+                if near_term_bonus:
+                    reasoning.append(f"Expires in {days_to_expiry} days - near-term catalyst")
+                    confidence = "MEDIUM"
+                else:
+                    reasoning.append("Low price with activity suggests potential opportunity")
                 action = "BUY_YES"
-                confidence = "LOW"
-                edge = (0.25 - price) * 100
+                edge = (0.30 - price) * 100
 
-            # Moderately high price (85-95%) with recent activity
-            elif 0.85 <= price <= 0.95 and is_active:
+            # High price (80-97%) with activity
+            elif 0.80 <= price <= 0.97 and is_active:
                 reasoning.append(f"Price ${price:.2f} - market says {price*100:.0f}% likely")
                 reasoning.append(f"Active trading: {volume_24h:,} contracts in 24h")
-                reasoning.append("High price but not certain - potential NO value")
+                if near_term_bonus:
+                    reasoning.append(f"Expires in {days_to_expiry} days - near-term resolution")
+                    confidence = "MEDIUM"
+                else:
+                    reasoning.append("High price but not certain - potential NO value")
                 action = "BUY_NO"
-                confidence = "LOW"
-                edge = (price - 0.75) * 100
+                edge = (price - 0.70) * 100
 
             # Mid-range with high volume spike = something happening
             elif 0.25 <= price <= 0.75 and is_very_active:
