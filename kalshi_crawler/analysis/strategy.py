@@ -140,8 +140,8 @@ class StrategyGenerator:
                                 action = "BUY_YES"
                                 confidence = "MEDIUM"
 
-            # Fed Rate markets
-            elif any(kw in title for kw in ["fed", "fomc", "interest rate", "rate cut", "rate hike"]):
+            # Fed Rate markets - be specific to avoid matching "federal spending" etc.
+            elif any(kw in title for kw in ["fomc", "interest rate", "rate cut", "rate hike", "federal reserve", "fed funds", "fed rate"]) or ("fed" in title.split() and "federal spending" not in title):
                 fed_funds = indicators.get("FEDFUNDS")
                 t10y2y = indicators.get("T10Y2Y")
 

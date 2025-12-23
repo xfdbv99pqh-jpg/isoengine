@@ -1,8 +1,6 @@
 """Kalshi API crawler for market data."""
 
 import logging
-import hashlib
-import hmac
 import time
 from datetime import datetime
 from typing import Optional
@@ -16,6 +14,9 @@ logger = logging.getLogger(__name__)
 class KalshiCrawler(BaseCrawler):
     """Crawler for Kalshi prediction market data."""
 
+    # Kalshi public API - no auth needed for market data
+    PUBLIC_API_URL = "https://api.elections.kalshi.com/trade-api/v2"
+
     def __init__(self, config: CrawlerConfig):
         super().__init__(
             name="kalshi",
@@ -26,47 +27,22 @@ class KalshiCrawler(BaseCrawler):
         )
         self.config = config
         self.api_key = config.kalshi_api_key
-        self.api_secret = config.kalshi_api_secret
-        self.base_url = config.kalshi_demo_url if config.use_kalshi_demo else config.kalshi_base_url
-        self.token: Optional[str] = None
-        self.token_expiry: Optional[datetime] = None
+        # Use public API for market data (no auth required)
+        self.base_url = self.PUBLIC_API_URL
 
     def is_available(self) -> bool:
-        """Check if Kalshi API is configured."""
-        return bool(self.api_key and self.api_secret)
+        """Kalshi public market data is always available."""
+        return True  # Public endpoints don't require auth
 
     def _get_auth_headers(self) -> dict:
-        """Generate authentication headers for Kalshi API."""
-        if not self.api_key:
-            return {}
-
-        timestamp = str(int(time.time() * 1000))
-
-        # For simple API key auth
-        return {
-            "Authorization": f"Bearer {self.token}" if self.token else "",
+        """Generate headers for Kalshi API."""
+        headers = {
+            "Accept": "application/json",
+            "Content-Type": "application/json",
         }
-
-    def _login(self) -> bool:
-        """Authenticate with Kalshi API."""
-        if not self.is_available():
-            logger.warning("Kalshi API credentials not configured")
-            return False
-
-        try:
-            response = self.post(
-                f"{self.base_url}/login",
-                json={
-                    "email": self.api_key,
-                    "password": self.api_secret,
-                },
-            )
-            data = response.json()
-            self.token = data.get("token")
-            return bool(self.token)
-        except Exception as e:
-            logger.error(f"Kalshi login failed: {e}")
-            return False
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        return headers
 
     def get_markets(
         self,
@@ -112,27 +88,41 @@ class KalshiCrawler(BaseCrawler):
         response = self.get(f"{self.base_url}/series", params=params, headers=headers)
         return response.json()
 
-    def get_orderbook(self, ticker: str, depth: int = 10) -> dict:
-        """Get orderbook for a market."""
-        params = {"depth": depth}
-        headers = self._get_auth_headers()
-        response = self.get(f"{self.base_url}/markets/{ticker}/orderbook", params=params, headers=headers)
-        return response.json()
-
     def crawl(self) -> list[CrawlResult]:
         """Crawl all open markets and return standardized results."""
         results = []
         now = datetime.utcnow()
 
         try:
-            # Get all open markets
-            markets_response = self.get_markets(status="open", limit=200)
-            markets = markets_response.get("markets", [])
+            # Get all open markets with pagination
+            all_markets = []
+            cursor = None
 
-            for market in markets:
-                # Extract key pricing info
-                yes_price = market.get("yes_price", 0) / 100 if market.get("yes_price") else None
-                no_price = market.get("no_price", 0) / 100 if market.get("no_price") else None
+            for _ in range(10):  # Max 10 pages (1000 markets)
+                markets_response = self.get_markets(status="open", limit=100, cursor=cursor)
+                markets = markets_response.get("markets", [])
+                all_markets.extend(markets)
+
+                cursor = markets_response.get("cursor")
+                if not cursor or not markets:
+                    break
+
+            logger.info(f"Fetched {len(all_markets)} Kalshi markets")
+
+            for market in all_markets:
+                # Extract key pricing info - Kalshi returns prices in cents
+                yes_bid = market.get("yes_bid")
+                yes_ask = market.get("yes_ask")
+
+                # Calculate mid price
+                if yes_bid is not None and yes_ask is not None:
+                    yes_price = (yes_bid + yes_ask) / 2 / 100
+                elif yes_bid is not None:
+                    yes_price = yes_bid / 100
+                elif yes_ask is not None:
+                    yes_price = yes_ask / 100
+                else:
+                    yes_price = None
 
                 result = CrawlResult(
                     source="kalshi",
@@ -144,9 +134,8 @@ class KalshiCrawler(BaseCrawler):
                         "title": market.get("title"),
                         "subtitle": market.get("subtitle"),
                         "yes_price": yes_price,
-                        "no_price": no_price,
-                        "yes_bid": market.get("yes_bid", 0) / 100 if market.get("yes_bid") else None,
-                        "yes_ask": market.get("yes_ask", 0) / 100 if market.get("yes_ask") else None,
+                        "yes_bid": yes_bid / 100 if yes_bid else None,
+                        "yes_ask": yes_ask / 100 if yes_ask else None,
                         "volume": market.get("volume"),
                         "volume_24h": market.get("volume_24h"),
                         "open_interest": market.get("open_interest"),
@@ -175,26 +164,32 @@ class KalshiCrawler(BaseCrawler):
         """Categorize market based on ticker/title."""
         ticker = market.get("ticker", "").upper()
         title = market.get("title", "").lower()
+        event_ticker = market.get("event_ticker", "").upper()
 
         # Economic indicators
-        econ_keywords = ["inflation", "cpi", "gdp", "unemployment", "fed", "rate", "jobs", "payroll"]
-        if any(kw in title for kw in econ_keywords) or ticker.startswith(("CPI", "GDP", "FED", "RATE")):
+        econ_keywords = ["inflation", "cpi", "gdp", "unemployment", "fed", "rate", "jobs", "payroll", "fomc"]
+        if any(kw in title for kw in econ_keywords) or any(x in ticker or x in event_ticker for x in ["CPI", "GDP", "FED", "RATE", "FOMC", "ECON"]):
             return "economics"
 
         # Politics
-        political_keywords = ["election", "president", "congress", "senate", "vote", "trump", "biden", "democrat", "republican"]
+        political_keywords = ["election", "president", "congress", "senate", "vote", "trump", "biden", "democrat", "republican", "governor", "electoral"]
         if any(kw in title for kw in political_keywords):
             return "politics"
 
         # Tech
-        tech_keywords = ["tesla", "apple", "google", "microsoft", "meta", "nvidia", "ai", "tech"]
+        tech_keywords = ["tesla", "apple", "google", "microsoft", "meta", "nvidia", "ai", "spacex", "twitter"]
         if any(kw in title for kw in tech_keywords):
             return "tech"
 
         # Weather
-        weather_keywords = ["temperature", "hurricane", "weather", "climate"]
+        weather_keywords = ["temperature", "hurricane", "weather", "climate", "storm"]
         if any(kw in title for kw in weather_keywords):
             return "weather"
+
+        # Crypto
+        crypto_keywords = ["bitcoin", "btc", "ethereum", "eth", "crypto"]
+        if any(kw in title for kw in crypto_keywords):
+            return "crypto"
 
         return "other"
 
@@ -202,3 +197,13 @@ class KalshiCrawler(BaseCrawler):
         """Get markets filtered by category."""
         all_results = self.crawl()
         return [r.data for r in all_results if r.category == category]
+
+    def search_markets(self, query: str) -> list[dict]:
+        """Search markets by keyword."""
+        all_results = self.crawl()
+        query_lower = query.lower()
+        return [
+            r.data for r in all_results
+            if query_lower in (r.data.get("title", "") or "").lower()
+            or query_lower in (r.data.get("ticker", "") or "").lower()
+        ]

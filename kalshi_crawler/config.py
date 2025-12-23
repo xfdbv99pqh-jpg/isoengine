@@ -11,7 +11,7 @@ class CrawlerConfig:
     """Central configuration for all crawlers."""
 
     # API Keys (environment variables override defaults)
-    kalshi_api_key: Optional[str] = field(default_factory=lambda: os.getenv("KALSHI_API_KEY"))
+    kalshi_api_key: Optional[str] = field(default_factory=lambda: os.getenv("KALSHI_API_KEY", "c81fe355-832a-4b90-950e-10c9b1e32d5d"))
     kalshi_api_secret: Optional[str] = field(default_factory=lambda: os.getenv("KALSHI_API_SECRET"))
     fred_api_key: Optional[str] = field(default_factory=lambda: os.getenv("FRED_API_KEY", "98c03a5ce94055b8d476157e6363f35c"))
 
