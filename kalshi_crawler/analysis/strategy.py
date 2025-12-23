@@ -345,36 +345,53 @@ class StrategyGenerator:
                 except:
                     pass
 
-            # FOCUS: Near-term uncertain markets (expiring soon with prices 20-80%)
-            # These are the most actionable - real decisions coming soon
-            is_near_term = days_to_expiry is not None and 0 < days_to_expiry <= 14
-            is_uncertain = 0.20 <= price <= 0.80
-            has_activity = volume_24h >= 500
+            # RELAXED FILTERS: Find tradeable markets
+            # Tier 1: Near-term (≤60 days) + uncertain (10-90%) + some activity (100+)
+            # Tier 2: Any uncertain market with high activity
+            is_near_term = days_to_expiry is None or (0 < days_to_expiry <= 60)
+            is_uncertain = 0.10 <= price <= 0.90
+            has_activity = volume_24h >= 100 or volume >= 5000
 
-            if is_near_term and is_uncertain and has_activity:
-                reasoning = [
-                    f"Expires in {days_to_expiry} days with uncertain price ${price:.2f}",
-                    f"Active trading: {volume_24h:,} contracts in 24h",
-                    "Near-term resolution = high potential for price movement",
-                ]
+            if is_uncertain and has_activity:
+                reasoning = []
 
-                # Lean YES if price < 0.50, NO if > 0.50
-                if price < 0.45:
+                if days_to_expiry is not None and days_to_expiry <= 30:
+                    reasoning.append(f"Expires in {days_to_expiry} days")
+
+                reasoning.append(f"Price ${price:.2f} ({price*100:.0f}% YES implied)")
+
+                if volume_24h >= 100:
+                    reasoning.append(f"24h volume: {volume_24h:,} contracts")
+                elif volume >= 5000:
+                    reasoning.append(f"Total volume: {volume:,} contracts")
+
+                # Determine action based on price
+                if price < 0.40:
                     action = "BUY_YES"
                     edge = (0.50 - price) * 100
-                    reasoning.append(f"Currently trading below 50% - potential upside if YES")
-                elif price > 0.55:
+                    reasoning.append(f"Below 40% - potential value in YES")
+                elif price > 0.60:
                     action = "BUY_NO"
                     edge = (price - 0.50) * 100
-                    reasoning.append(f"Currently trading above 50% - potential value in NO")
+                    reasoning.append(f"Above 60% - potential value in NO")
                 else:
-                    action = "HOLD"
-                    edge = None
-                    reasoning.append("Price near 50/50 - wait for directional signal")
+                    # Near 50/50 - still flag if high volume
+                    if volume_24h >= 1000:
+                        action = "HOLD"
+                        edge = abs(0.50 - price) * 100
+                        reasoning.append("Near 50/50 but high activity - watch closely")
+                    else:
+                        continue  # Skip low-activity 50/50 markets
 
-                confidence = "MEDIUM" if days_to_expiry <= 7 else "LOW"
+                # Confidence based on activity + timing
+                if volume_24h >= 1000 and days_to_expiry is not None and days_to_expiry <= 14:
+                    confidence = "MEDIUM"
+                elif volume_24h >= 500:
+                    confidence = "LOW"
+                else:
+                    confidence = "LOW"
 
-                if action != "HOLD":
+                if action in ("BUY_YES", "BUY_NO"):
                     recommendations.append(TradeRecommendation(
                         ticker=ticker,
                         title=title,
@@ -383,14 +400,14 @@ class StrategyGenerator:
                         current_price=price,
                         target_price=None,
                         reasoning=reasoning,
-                        category="near_term_uncertain",
+                        category="volume_price",
                         data_sources=["kalshi"],
                         timestamp=now,
                         edge=edge,
                     ))
 
-            # Also flag high-activity mid-range markets regardless of expiry
-            elif is_uncertain and volume_24h >= 5000:
+            # High-activity uncertain markets (regardless of other filters)
+            elif 0.20 <= price <= 0.80 and volume_24h >= 2000:
                 high_vol_reasoning = [
                     f"Uncertain price ${price:.2f} with HIGH activity",
                     f"24h volume: {volume_24h:,} contracts",
