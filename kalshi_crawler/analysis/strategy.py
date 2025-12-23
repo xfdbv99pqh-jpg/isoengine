@@ -312,7 +312,7 @@ class StrategyGenerator:
         return recommendations[:10]
 
     def _analyze_volume_price_extremes(self) -> list[TradeRecommendation]:
-        """Find liquid markets with extreme prices."""
+        """Find liquid markets with interesting price levels."""
         recommendations = []
         now = datetime.utcnow()
 
@@ -330,11 +330,16 @@ class StrategyGenerator:
             if not price:
                 continue
 
-            # Require significant liquidity
-            is_liquid = volume > 50000 or (volume > 10000 and volume_24h > 2000)
-            is_very_liquid = volume > 100000 or volume_24h > 10000
+            # Skip dead markets ($0.01 or $0.99) - these are essentially resolved
+            if price <= 0.02 or price >= 0.98:
+                continue
 
-            if not is_liquid:
+            # Require RECENT activity, not just historical volume
+            has_recent_activity = volume_24h >= 100
+            is_active = volume_24h >= 1000
+            is_very_active = volume_24h >= 5000
+
+            if not has_recent_activity:
                 continue
 
             reasoning = []
@@ -342,30 +347,30 @@ class StrategyGenerator:
             confidence = "LOW"
             edge = None
 
-            # Very low price with high volume = market confident it won't happen
-            if price <= 0.10 and is_very_liquid:
-                reasoning.append(f"Price ${price:.2f} - market says only {price*100:.0f}% chance")
-                reasoning.append(f"Very liquid: {volume:,} total / {volume_24h:,} 24h volume")
-                reasoning.append("Contrarian YES if you have edge the market is missing")
+            # Moderately low price (5-15%) with recent activity - potential value
+            if 0.05 <= price <= 0.15 and is_active:
+                reasoning.append(f"Price ${price:.2f} - market says {price*100:.0f}% chance")
+                reasoning.append(f"Active trading: {volume_24h:,} contracts in 24h")
+                reasoning.append("Low price with activity suggests potential opportunity")
                 action = "BUY_YES"
                 confidence = "LOW"
-                edge = (0.20 - price) * 100  # If true probability is 20%
+                edge = (0.25 - price) * 100
 
-            # Very high price with high volume
-            elif price >= 0.90 and is_very_liquid:
+            # Moderately high price (85-95%) with recent activity
+            elif 0.85 <= price <= 0.95 and is_active:
                 reasoning.append(f"Price ${price:.2f} - market says {price*100:.0f}% likely")
-                reasoning.append(f"Very liquid: {volume:,} total / {volume_24h:,} 24h volume")
-                reasoning.append("Contrarian NO if you see risk the market is missing")
+                reasoning.append(f"Active trading: {volume_24h:,} contracts in 24h")
+                reasoning.append("High price but not certain - potential NO value")
                 action = "BUY_NO"
                 confidence = "LOW"
-                edge = (price - 0.80) * 100  # If true probability is 80%
+                edge = (price - 0.75) * 100
 
-            # Mid-range with unusual volume spike
-            elif 0.30 <= price <= 0.70 and volume_24h > 5000:
-                reasoning.append(f"Uncertain price ${price:.2f} with high activity")
+            # Mid-range with high volume spike = something happening
+            elif 0.25 <= price <= 0.75 and is_very_active:
+                reasoning.append(f"Uncertain price ${price:.2f} with HIGH activity")
                 reasoning.append(f"24h volume spike: {volume_24h:,} contracts")
-                reasoning.append("Something may be happening - research this market")
-                action = "HOLD"  # Flag for research, don't recommend action
+                reasoning.append("Market is actively debating - research opportunity")
+                action = "HOLD"
                 confidence = "MEDIUM"
 
             if reasoning and action != "HOLD":
