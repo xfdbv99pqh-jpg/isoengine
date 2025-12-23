@@ -218,7 +218,9 @@ class StrategyGenerator:
         cpi_yoy = None
         if "CPIAUCSL" in indicators:
             cpi_data = json.loads(indicators["CPIAUCSL"].get("data", "{}"))
-            cpi_yoy = cpi_data.get("change_12_period", {}).get("percent")
+            change_data = cpi_data.get("change_12_period")
+            if change_data and isinstance(change_data, dict):
+                cpi_yoy = change_data.get("percent")
 
         for km in kalshi_markets:
             k_data = json.loads(km.get("data", "{}"))

@@ -161,6 +161,9 @@ class CrawlerDatabase:
                 self._store_news(conn, result)
             elif result.data_type == "poll":
                 self._store_poll(conn, result)
+            elif result.data_type in ("calendar", "betting_odds", "social"):
+                # Store calendar, betting, and social data in markets table
+                self._store_generic(conn, result)
             else:
                 logger.warning(f"Unknown data type: {result.data_type}")
 
@@ -251,6 +254,25 @@ class CrawlerDatabase:
             result.data.get("poll_type"),
             json.dumps(result.data),
             result.timestamp,
+        ))
+
+    def _store_generic(self, conn: sqlite3.Connection, result: CrawlResult):
+        """Store generic data (calendar, betting_odds, social) in markets table."""
+        data = result.data
+        # Use source as identifier since these don't have tickers
+        ticker = data.get("id") or data.get("symbol") or data.get("event") or result.source
+
+        conn.execute("""
+            INSERT OR REPLACE INTO markets (source, ticker, title, category, crawled_at, data, metadata)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (
+            result.source,
+            str(ticker)[:100],  # Limit length
+            data.get("title") or data.get("name") or data.get("event") or data.get("question"),
+            result.category,
+            result.timestamp,
+            json.dumps(data),
+            json.dumps(result.metadata),
         ))
 
     def store_signal(
