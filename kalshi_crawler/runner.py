@@ -18,6 +18,10 @@ from .sources import (
     PolymarketCrawler,
     PollingCrawler,
     RSSCrawler,
+    EconomicCalendarCrawler,
+    BettingOddsCrawler,
+    EarningsCalendarCrawler,
+    SocialSentimentCrawler,
 )
 
 logger = logging.getLogger(__name__)
@@ -47,6 +51,10 @@ class CrawlerRunner:
         self.crawlers["polymarket"] = PolymarketCrawler(self.config)
         self.crawlers["polling"] = PollingCrawler(self.config)
         self.crawlers["rss"] = RSSCrawler(self.config)
+        self.crawlers["economic_calendar"] = EconomicCalendarCrawler(self.config)
+        self.crawlers["betting_odds"] = BettingOddsCrawler(self.config)
+        self.crawlers["earnings_calendar"] = EarningsCalendarCrawler(self.config)
+        self.crawlers["social_sentiment"] = SocialSentimentCrawler(self.config)
 
         # Log availability
         for name, crawler in self.crawlers.items():
@@ -134,8 +142,18 @@ class CrawlerRunner:
         # News (every 15 minutes)
         schedule.every(15).minutes.do(lambda: self.run_crawler("rss"))
 
+        # Social sentiment (every 15 minutes)
+        schedule.every(15).minutes.do(lambda: self.run_crawler("social_sentiment"))
+
         # Economic data (hourly, since it doesn't update that often)
         schedule.every(1).hours.do(lambda: self.run_crawler("fred"))
+
+        # Calendars (every 4 hours - these don't change frequently)
+        schedule.every(4).hours.do(lambda: self.run_crawler("economic_calendar"))
+        schedule.every(4).hours.do(lambda: self.run_crawler("earnings_calendar"))
+
+        # Betting odds (every 30 minutes)
+        schedule.every(30).minutes.do(lambda: self.run_crawler("betting_odds"))
 
         # Polling (every 2 hours)
         schedule.every(2).hours.do(lambda: self.run_crawler("polling"))
@@ -228,6 +246,46 @@ class CrawlerRunner:
                 print(f"Generated {len(signals)} signals")
                 for s in signals:
                     print(f"  {s}")
+
+            def do_calendar(self, arg):
+                """Show upcoming economic events: calendar [days]"""
+                days = int(arg) if arg else 7
+                crawler = runner.crawlers.get("economic_calendar")
+                if crawler:
+                    events = crawler.get_upcoming_events(days)
+                    print(f"\nUpcoming events (next {days} days):")
+                    for e in events:
+                        print(f"  {e.get('date')}: {e.get('name')} ({e.get('type')})")
+
+            def do_earnings(self, arg):
+                """Show upcoming earnings: earnings [days]"""
+                days = int(arg) if arg else 7
+                crawler = runner.crawlers.get("earnings_calendar")
+                if crawler:
+                    earnings = crawler.get_upcoming_earnings(days)
+                    print(f"\nUpcoming earnings (next {days} days):")
+                    for e in earnings:
+                        print(f"  {e.get('earnings_date')}: {e.get('symbol')} - {e.get('company', 'N/A')}")
+
+            def do_sentiment(self, arg):
+                """Show social sentiment summary"""
+                crawler = runner.crawlers.get("social_sentiment")
+                if crawler:
+                    summary = crawler.get_sentiment_summary()
+                    print(f"\nSocial Sentiment Summary:")
+                    print(f"Overall: {summary['overall']}")
+                    for cat, scores in summary.get('by_category', {}).items():
+                        print(f"  {cat}: {scores}")
+
+            def do_odds(self, arg):
+                """Show election betting odds"""
+                crawler = runner.crawlers.get("betting_odds")
+                if crawler:
+                    consensus = crawler.get_election_consensus()
+                    print(f"\nBetting Odds Consensus:")
+                    for candidate, data in consensus.get('candidates', {}).items():
+                        prob = data.get('avg_probability', 0) * 100
+                        print(f"  {candidate}: {prob:.1f}%")
 
             def do_strategy(self, arg):
                 """Generate investment strategy report: strategy [picks]"""

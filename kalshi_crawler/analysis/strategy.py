@@ -73,17 +73,26 @@ class StrategyGenerator:
         # 1. Cross-market arbitrage (highest confidence)
         recommendations.extend(self._find_arbitrage_opportunities())
 
-        # 2. Economic indicator misalignment
+        # 2. Betting odds arbitrage (cross-platform)
+        recommendations.extend(self._find_betting_odds_arbitrage())
+
+        # 3. Economic indicator misalignment
         recommendations.extend(self._analyze_economic_misalignment())
 
-        # 3. High volume + price extreme opportunities
+        # 4. Calendar-driven opportunities (FOMC, BLS, earnings)
+        recommendations.extend(self._analyze_calendar_events())
+
+        # 5. High volume + price extreme opportunities
         recommendations.extend(self._analyze_volume_price_extremes())
 
-        # 4. Expiring soon with uncertain prices
+        # 6. Expiring soon with uncertain prices
         recommendations.extend(self._analyze_expiring_markets())
 
-        # 5. News-driven momentum
+        # 7. News-driven momentum
         recommendations.extend(self._analyze_news_momentum())
+
+        # 8. Social sentiment signals
+        recommendations.extend(self._analyze_social_sentiment())
 
         # Sort by confidence then edge
         confidence_order = {"HIGH": 0, "MEDIUM": 1, "LOW": 2}
@@ -500,6 +509,297 @@ class StrategyGenerator:
                     break
 
         return recommendations[:5]
+
+    def _find_betting_odds_arbitrage(self) -> list[TradeRecommendation]:
+        """Find discrepancies between Kalshi and traditional betting markets."""
+        recommendations = []
+        now = datetime.utcnow()
+
+        kalshi_markets = self.db.get_latest_markets(source="kalshi", limit=1000)
+
+        # Get betting odds data
+        betting_data = self.db.get_latest_markets(source="betting_election", limit=100)
+        betting_data.extend(self.db.get_latest_markets(source="betting_metaculus", limit=100))
+
+        # Build betting odds index
+        betting_index = {}
+        for bd in betting_data:
+            try:
+                data = json.loads(bd.get("data", "{}"))
+                candidate = (data.get("candidate") or data.get("title") or "").lower()
+                probability = data.get("probability")
+                if candidate and probability:
+                    betting_index[candidate] = probability
+            except:
+                continue
+
+        # Find matching Kalshi markets
+        for km in kalshi_markets:
+            k_data = json.loads(km.get("data", "{}"))
+            title = (k_data.get("title") or "").lower()
+            ticker = k_data.get("ticker", "UNKNOWN")
+            price = k_data.get("yes_price")
+
+            if not price:
+                continue
+
+            # Check for candidate/event matches
+            for candidate, bet_prob in betting_index.items():
+                if candidate in title:
+                    diff = abs(price - bet_prob)
+
+                    if diff >= 0.05:  # 5%+ difference
+                        edge = diff * 100
+
+                        if price > bet_prob:
+                            action = "BUY_NO"
+                            reasoning = [
+                                f"Kalshi YES @ ${price:.2f} vs betting markets @ ${bet_prob:.2f}",
+                                f"Kalshi is {diff*100:.1f}% higher than betting consensus",
+                                "Potential overpricing on Kalshi",
+                            ]
+                        else:
+                            action = "BUY_YES"
+                            reasoning = [
+                                f"Kalshi YES @ ${price:.2f} vs betting markets @ ${bet_prob:.2f}",
+                                f"Kalshi is {diff*100:.1f}% lower than betting consensus",
+                                "Potential value on Kalshi",
+                            ]
+
+                        confidence = "MEDIUM" if diff >= 0.08 else "LOW"
+
+                        recommendations.append(TradeRecommendation(
+                            ticker=ticker,
+                            title=k_data.get("title", ""),
+                            action=action,
+                            confidence=confidence,
+                            current_price=price,
+                            target_price=bet_prob,
+                            reasoning=reasoning,
+                            category="betting_arb",
+                            data_sources=["kalshi", "betting_odds"],
+                            timestamp=now,
+                            edge=edge,
+                        ))
+                        break
+
+        return recommendations[:10]
+
+    def _analyze_calendar_events(self) -> list[TradeRecommendation]:
+        """Find markets with upcoming catalyst events."""
+        recommendations = []
+        now = datetime.utcnow()
+
+        kalshi_markets = self.db.get_latest_markets(source="kalshi", limit=1000)
+
+        # Get calendar events
+        econ_calendar = self.db.get_latest_markets(source="calendar_fomc", limit=20)
+        econ_calendar.extend(self.db.get_latest_markets(source="calendar_bls", limit=20))
+        earnings_calendar = self.db.get_latest_markets(source="earnings_yahoo", limit=50)
+        earnings_calendar.extend(self.db.get_latest_markets(source="earnings_nasdaq", limit=50))
+
+        # Build event index by days until
+        upcoming_fomc = []
+        upcoming_bls = []
+        upcoming_earnings = {}
+
+        for event in econ_calendar:
+            try:
+                data = json.loads(event.get("data", "{}"))
+                days_until = data.get("days_until")
+                if days_until is not None and days_until <= 14:
+                    event_type = data.get("type", "")
+                    if "fomc" in event_type:
+                        upcoming_fomc.append(data)
+                    elif event_type in ("jobs_report", "cpi"):
+                        upcoming_bls.append(data)
+            except:
+                continue
+
+        for earning in earnings_calendar:
+            try:
+                data = json.loads(earning.get("data", "{}"))
+                symbol = data.get("symbol")
+                days_until = data.get("days_until")
+                if symbol and days_until is not None and days_until <= 14:
+                    upcoming_earnings[symbol.lower()] = data
+            except:
+                continue
+
+        # Analyze markets for calendar catalysts
+        for km in kalshi_markets:
+            k_data = json.loads(km.get("data", "{}"))
+            title = (k_data.get("title") or "").lower()
+            ticker = k_data.get("ticker", "UNKNOWN")
+            price = k_data.get("yes_price")
+
+            if not price:
+                continue
+
+            reasoning = []
+            action = "HOLD"
+            confidence = "LOW"
+            edge = None
+
+            # FOMC-related markets with upcoming meeting
+            if upcoming_fomc and any(kw in title for kw in ["fed", "fomc", "rate", "powell"]):
+                next_fomc = upcoming_fomc[0]
+                days = next_fomc.get("days_until", 0)
+                reasoning.append(f"FOMC meeting in {days} days")
+                reasoning.append(f"Market at ${price:.2f} - expect volatility around decision")
+                if 0.30 <= price <= 0.70:
+                    reasoning.append("Uncertain price = high potential movement")
+                    confidence = "MEDIUM"
+                action = "HOLD"  # Flag for research
+
+            # BLS releases affecting economic markets
+            elif upcoming_bls and any(kw in title for kw in ["unemployment", "jobs", "cpi", "inflation", "payroll"]):
+                next_bls = upcoming_bls[0]
+                days = next_bls.get("days_until", 0)
+                event_name = next_bls.get("name", "Economic release")
+                reasoning.append(f"{event_name} in {days} days")
+                reasoning.append(f"Market at ${price:.2f} - data release will move price")
+                if 0.30 <= price <= 0.70:
+                    reasoning.append("Uncertain price before data = opportunity")
+                    confidence = "MEDIUM"
+                action = "HOLD"
+
+            # Earnings affecting company-related markets
+            else:
+                for company_kw in ["tesla", "apple", "nvidia", "microsoft", "google", "amazon", "meta"]:
+                    symbol_map = {
+                        "tesla": "tsla", "apple": "aapl", "nvidia": "nvda",
+                        "microsoft": "msft", "google": "googl", "amazon": "amzn", "meta": "meta"
+                    }
+                    if company_kw in title:
+                        symbol = symbol_map.get(company_kw)
+                        if symbol and symbol in upcoming_earnings:
+                            earnings = upcoming_earnings[symbol]
+                            days = earnings.get("days_until", 0)
+                            reasoning.append(f"{company_kw.title()} earnings in {days} days")
+                            reasoning.append(f"Market at ${price:.2f} - earnings could be catalyst")
+                            if 0.30 <= price <= 0.70:
+                                reasoning.append("Position before earnings for volatility play")
+                                confidence = "MEDIUM"
+                            action = "HOLD"
+                            break
+
+            if reasoning:
+                recommendations.append(TradeRecommendation(
+                    ticker=ticker,
+                    title=k_data.get("title", ""),
+                    action=action,
+                    confidence=confidence,
+                    current_price=price,
+                    target_price=None,
+                    reasoning=reasoning,
+                    category="calendar_catalyst",
+                    data_sources=["kalshi", "calendar"],
+                    timestamp=now,
+                    edge=edge,
+                ))
+
+        return recommendations[:10]
+
+    def _analyze_social_sentiment(self) -> list[TradeRecommendation]:
+        """Find markets with strong social sentiment signals."""
+        recommendations = []
+        now = datetime.utcnow()
+
+        kalshi_markets = self.db.get_latest_markets(source="kalshi", limit=1000)
+
+        # Get social sentiment data
+        reddit_data = []
+        for subreddit in ["wallstreetbets", "stocks", "investing", "politics", "technology"]:
+            reddit_data.extend(self.db.get_latest_markets(source=f"reddit_{subreddit}", limit=50))
+
+        hn_data = self.db.get_latest_markets(source="hackernews", limit=50)
+
+        # Build sentiment keyword index
+        keyword_sentiment = {}
+        tracked_keywords = [
+            "trump", "biden", "election", "fed", "inflation", "recession",
+            "tesla", "musk", "bitcoin", "crypto", "ai", "nvidia",
+            "rate", "unemployment", "jobs"
+        ]
+
+        for item in reddit_data + hn_data:
+            try:
+                data = json.loads(item.get("data", "{}"))
+                keywords = data.get("keywords_found", [])
+                sentiment = data.get("sentiment", "neutral")
+                score = data.get("score", 0) or 0
+
+                for kw in keywords:
+                    if kw not in keyword_sentiment:
+                        keyword_sentiment[kw] = {"positive": 0, "negative": 0, "neutral": 0, "total_score": 0}
+                    keyword_sentiment[kw][sentiment] += 1
+                    keyword_sentiment[kw]["total_score"] += score
+            except:
+                continue
+
+        # Find markets with strong sentiment signal
+        for km in kalshi_markets:
+            k_data = json.loads(km.get("data", "{}"))
+            title = (k_data.get("title") or "").lower()
+            ticker = k_data.get("ticker", "UNKNOWN")
+            price = k_data.get("yes_price")
+
+            if not price:
+                continue
+
+            # Check for keyword matches with strong sentiment
+            for kw, sentiment in keyword_sentiment.items():
+                if kw in title:
+                    total = sentiment["positive"] + sentiment["negative"] + sentiment["neutral"]
+                    if total < 5:
+                        continue  # Not enough data
+
+                    pos_ratio = sentiment["positive"] / total
+                    neg_ratio = sentiment["negative"] / total
+
+                    reasoning = []
+                    action = "HOLD"
+                    confidence = "LOW"
+                    edge = None
+
+                    # Strong bullish sentiment
+                    if pos_ratio > 0.6 and sentiment["total_score"] > 1000:
+                        reasoning.append(f"Strong bullish sentiment on '{kw}': {pos_ratio*100:.0f}% positive")
+                        reasoning.append(f"Social score: {sentiment['total_score']:,} points across {total} posts")
+                        if price < 0.50:
+                            reasoning.append(f"Price ${price:.2f} may be undervalued given sentiment")
+                            action = "BUY_YES"
+                            confidence = "LOW"
+                            edge = (0.55 - price) * 100
+
+                    # Strong bearish sentiment
+                    elif neg_ratio > 0.6 and sentiment["total_score"] > 1000:
+                        reasoning.append(f"Strong bearish sentiment on '{kw}': {neg_ratio*100:.0f}% negative")
+                        reasoning.append(f"Social score: {sentiment['total_score']:,} points across {total} posts")
+                        if price > 0.50:
+                            reasoning.append(f"Price ${price:.2f} may be overvalued given sentiment")
+                            action = "BUY_NO"
+                            confidence = "LOW"
+                            edge = (price - 0.45) * 100
+
+                    if reasoning:
+                        recommendations.append(TradeRecommendation(
+                            ticker=ticker,
+                            title=k_data.get("title", ""),
+                            action=action,
+                            confidence=confidence,
+                            current_price=price,
+                            target_price=None,
+                            reasoning=reasoning,
+                            category="social_sentiment",
+                            data_sources=["kalshi", "reddit", "hackernews"],
+                            timestamp=now,
+                            edge=edge,
+                        ))
+                        break  # One recommendation per market
+
+        return recommendations[:10]
 
     def get_top_picks(self, n: int = 10) -> list[TradeRecommendation]:
         """Get top N actionable recommendations."""
