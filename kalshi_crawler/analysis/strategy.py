@@ -124,22 +124,38 @@ class StrategyGenerator:
 
         # Load Polymarket prices
         poly_markets = self.db.get_latest_markets(source="polymarket", limit=500)
+        logger.debug(f"Raw Polymarket markets from DB: {len(poly_markets)}")
+        poly_loaded = 0
         for pm in poly_markets:
             try:
                 pm_data = json.loads(pm.get("data", "{}"))
                 question = (pm_data.get("question") or pm_data.get("title") or "").lower()
-                price = pm_data.get("prices", {}).get("Yes") or pm_data.get("yes_price")
+
+                # Handle different price formats
+                prices = pm_data.get("prices", {})
+                price = prices.get("Yes") or prices.get("yes") or pm_data.get("yes_price")
+
+                # Try to get first outcome price if specific "Yes" not found
+                if not price and prices:
+                    first_key = list(prices.keys())[0] if prices else None
+                    if first_key:
+                        price = prices[first_key]
+
                 if question and price:
+                    poly_loaded += 1
                     # Store with multiple key variations for matching
                     data["polymarket"][question] = price
                     # Also index by key terms
-                    for term in ["trump", "biden", "fed", "inflation", "bitcoin", "tesla", "nvidia"]:
+                    for term in ["trump", "biden", "fed", "inflation", "bitcoin", "tesla", "nvidia",
+                                 "election", "president", "congress", "senate", "recession", "rate"]:
                         if term in question:
                             if term not in data["polymarket"]:
                                 data["polymarket"][term] = []
                             data["polymarket"][term].append({"question": question, "price": price})
-            except:
+            except Exception as e:
+                logger.debug(f"Error loading Polymarket data: {e}")
                 continue
+        logger.debug(f"Loaded {poly_loaded} Polymarket markets with prices")
 
         # Load betting odds
         for source in ["betting_election", "betting_metaculus"]:
@@ -201,11 +217,12 @@ class StrategyGenerator:
                     continue
 
         # Log what we found
-        poly_count = len([k for k, v in data["polymarket"].items() if not isinstance(v, list)])
+        poly_count = sum(1 for k, v in data["polymarket"].items() if not isinstance(v, list))
+        poly_keywords = sum(1 for k, v in data["polymarket"].items() if isinstance(v, list))
         betting_count = len(data["betting_odds"])
         sentiment_count = len(data["social_sentiment"])
         calendar_count = len(data["calendar_events"])
-        logger.info(f"Reference data: {poly_count} Polymarket, {betting_count} betting, {sentiment_count} sentiment keywords, {calendar_count} calendar events")
+        logger.info(f"Reference data: {poly_count} Polymarket questions + {poly_keywords} keyword lists, {betting_count} betting, {sentiment_count} sentiment, {calendar_count} calendar")
 
         self._reference_data = data
         return data
@@ -392,34 +409,54 @@ class StrategyGenerator:
 
         # Get all Kalshi markets
         kalshi_markets = self.db.get_latest_markets(source="kalshi", limit=1000)
+        logger.info(f"Loaded {len(kalshi_markets)} Kalshi markets from database")
+
+        # Debug: check first few markets
+        debug_stats = {"no_price": 0, "dead_market": 0, "no_expiry": 0, "outside_window": 0, "low_volume": 0, "ok": 0}
 
         # Score each market
         scored_markets = []
         for km in kalshi_markets:
             try:
                 k_data = json.loads(km.get("data", "{}"))
-                signal = self._compute_market_signal(k_data, ref_data)
+                ticker = k_data.get("ticker", "?")
+                price = k_data.get("yes_price")
 
+                if not price:
+                    debug_stats["no_price"] += 1
+                    continue
+                if price <= 0.02 or price >= 0.98:
+                    debug_stats["dead_market"] += 1
+                    continue
+
+                signal = self._compute_market_signal(k_data, ref_data)
                 if signal is None:
                     continue
 
                 # FILTER: Only markets settling within specified window
                 if signal.days_to_expiry is None:
-                    continue  # Skip if no expiry date
-                if signal.days_to_expiry < days_min or signal.days_to_expiry > days_max:
-                    continue  # Outside our window
-
-                # Require some activity
-                if signal.volume_24h < 50 and signal.total_volume < 1000:
+                    debug_stats["no_expiry"] += 1
+                    # Include anyway if high volume (fallback)
+                    if signal.volume_24h < 500:
+                        continue
+                elif signal.days_to_expiry < days_min or signal.days_to_expiry > days_max:
+                    debug_stats["outside_window"] += 1
                     continue
 
+                # Relaxed volume requirement
+                if signal.volume_24h < 10 and signal.total_volume < 100:
+                    debug_stats["low_volume"] += 1
+                    continue
+
+                debug_stats["ok"] += 1
                 score = self._score_market(signal)
                 scored_markets.append((signal, score))
             except Exception as e:
-                logger.debug(f"Error scoring market: {e}")
+                logger.debug(f"Error scoring market {ticker}: {e}")
                 continue
 
-        logger.info(f"Found {len(scored_markets)} markets settling in {days_min}-{days_max} days")
+        logger.info(f"Market filter stats: {debug_stats}")
+        logger.info(f"Found {len(scored_markets)} candidate markets")
 
         # Debug: show score distribution
         if scored_markets:
