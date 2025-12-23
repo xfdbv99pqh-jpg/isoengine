@@ -139,10 +139,7 @@ class CrawlerDatabase:
     @contextmanager
     def _get_connection(self):
         """Get a database connection with context manager."""
-        conn = sqlite3.connect(
-            self.db_path,
-            detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES
-        )
+        conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
         try:
             yield conn
@@ -312,7 +309,7 @@ class CrawlerDatabase:
     def get_price_history(self, ticker: str, hours: int = 24) -> list[dict]:
         """Get price history for a ticker."""
         with self._get_connection() as conn:
-            cutoff = datetime.utcnow() - timedelta(hours=hours)
+            cutoff = (datetime.utcnow() - timedelta(hours=hours)).isoformat()
             rows = conn.execute("""
                 SELECT * FROM price_history
                 WHERE ticker = ? AND recorded_at > ?
@@ -341,7 +338,7 @@ class CrawlerDatabase:
     def get_recent_news(self, category: Optional[str] = None, hours: int = 24, limit: int = 100) -> list[dict]:
         """Get recent news items."""
         with self._get_connection() as conn:
-            cutoff = datetime.utcnow() - timedelta(hours=hours)
+            cutoff = (datetime.utcnow() - timedelta(hours=hours)).isoformat()
             query = "SELECT * FROM news WHERE crawled_at > ?"
             params = [cutoff]
 
@@ -378,7 +375,7 @@ class CrawlerDatabase:
     def get_crawl_stats(self, hours: int = 24) -> dict:
         """Get crawl statistics."""
         with self._get_connection() as conn:
-            cutoff = datetime.utcnow() - timedelta(hours=hours)
+            cutoff = (datetime.utcnow() - timedelta(hours=hours)).isoformat()
 
             stats = {}
             rows = conn.execute("""
@@ -400,7 +397,7 @@ class CrawlerDatabase:
     def cleanup_old_data(self, days: int = 30):
         """Remove data older than specified days."""
         with self._get_connection() as conn:
-            cutoff = datetime.utcnow() - timedelta(days=days)
+            cutoff = (datetime.utcnow() - timedelta(days=days)).isoformat()
 
             conn.execute("DELETE FROM price_history WHERE recorded_at < ?", (cutoff,))
             conn.execute("DELETE FROM news WHERE crawled_at < ?", (cutoff,))

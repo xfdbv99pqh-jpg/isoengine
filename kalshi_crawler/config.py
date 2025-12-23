@@ -46,13 +46,14 @@ class CrawlerConfig:
     # RSS feeds to monitor
     rss_feeds: list = field(default_factory=lambda: [
         # Politics
-        {"name": "AP Politics", "url": "https://rsshub.app/apnews/topics/politics", "category": "politics"},
-        {"name": "Reuters Politics", "url": "https://www.reutersagency.com/feed/?taxonomy=best-topics&post_type=best&best-topics=political-general", "category": "politics"},
+        {"name": "NPR Politics", "url": "https://feeds.npr.org/1014/rss.xml", "category": "politics"},
+        {"name": "NYT Politics", "url": "https://rss.nytimes.com/services/xml/rss/nyt/Politics.xml", "category": "politics"},
         # Economics
         {"name": "Fed News", "url": "https://www.federalreserve.gov/feeds/press_all.xml", "category": "economics"},
+        {"name": "WSJ Markets", "url": "https://feeds.content.dowjones.io/public/rss/mw_realtimeheadlines", "category": "economics"},
         # Tech
         {"name": "HackerNews", "url": "https://hnrss.org/frontpage", "category": "tech"},
-        {"name": "TechCrunch", "url": "https://techcrunch.com/feed/", "category": "tech"},
+        {"name": "Ars Technica", "url": "https://feeds.arstechnica.com/arstechnica/technology-lab", "category": "tech"},
     ])
 
     # Polling sources
