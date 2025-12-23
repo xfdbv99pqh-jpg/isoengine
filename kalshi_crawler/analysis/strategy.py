@@ -100,10 +100,10 @@ class StrategyGenerator:
     WEIGHT_TIMING = 0.15        # Calendar events + expiry
     WEIGHT_PRICE_LEVEL = 0.15   # Price extremes (but informed by other signals)
 
-    # Thresholds
-    MIN_SCORE_THRESHOLD = 0.10  # Minimum composite score to recommend
-    HIGH_CONFIDENCE_THRESHOLD = 0.25
-    MEDIUM_CONFIDENCE_THRESHOLD = 0.15
+    # Thresholds (lowered to be less restrictive)
+    MIN_SCORE_THRESHOLD = 0.02  # Minimum composite score to recommend
+    HIGH_CONFIDENCE_THRESHOLD = 0.15
+    MEDIUM_CONFIDENCE_THRESHOLD = 0.08
 
     def __init__(self, db: CrawlerDatabase):
         self.db = db
@@ -199,6 +199,13 @@ class StrategyGenerator:
                         data["calendar_events"].append(ev_data)
                 except:
                     continue
+
+        # Log what we found
+        poly_count = len([k for k, v in data["polymarket"].items() if not isinstance(v, list)])
+        betting_count = len(data["betting_odds"])
+        sentiment_count = len(data["social_sentiment"])
+        calendar_count = len(data["calendar_events"])
+        logger.info(f"Reference data: {poly_count} Polymarket, {betting_count} betting, {sentiment_count} sentiment keywords, {calendar_count} calendar events")
 
         self._reference_data = data
         return data
@@ -314,42 +321,50 @@ class StrategyGenerator:
         Magnitude indicates confidence.
         """
         score = 0.0
+        price = signal.kalshi_price
+        has_directional_signal = False
 
-        # 1. Cross-market signal (most important)
-        # If Polymarket/betting says higher, that's bullish for YES
+        # 1. Cross-market signal (most important - tells us direction)
         if signal.cross_market_signal != 0:
-            score += signal.cross_market_signal * self.WEIGHT_CROSS_MARKET * 2  # Scale up
+            score += signal.cross_market_signal * self.WEIGHT_CROSS_MARKET * 3  # Scale up
+            has_directional_signal = True
 
         # 2. Sentiment signal
-        if signal.social_sentiment is not None:
-            # Positive sentiment = bullish
+        if signal.social_sentiment is not None and abs(signal.social_sentiment) > 0.1:
             score += signal.social_sentiment * self.WEIGHT_SENTIMENT
+            has_directional_signal = True
 
-        # 3. Volume signal (amplifies other signals, doesn't set direction)
-        # High volume makes us more confident in whatever direction we're leaning
-        if signal.volume_signal > 0:
+        # 3. Price-based signal (fallback when no cross-market data)
+        # High volume + extreme price = potential opportunity
+        if not has_directional_signal and signal.volume_signal >= 0.3:
+            # Use price extremes as a weak directional signal
+            if price < 0.35:
+                # Low price with high volume - lean bullish
+                score = (0.50 - price) * self.WEIGHT_PRICE_LEVEL
+            elif price > 0.65:
+                # High price with high volume - lean bearish (value in NO)
+                score = -(price - 0.50) * self.WEIGHT_PRICE_LEVEL
+
+        # 4. Volume signal (amplifies score)
+        if signal.volume_signal > 0 and score != 0:
             score *= (1 + signal.volume_signal * 0.5)
 
-        # 4. Timing signal (catalyst upcoming)
+        # 5. Timing signal (catalyst upcoming amplifies)
         if signal.has_calendar_event and signal.timing_signal > 0:
-            # Catalyst upcoming amplifies signal
             score *= (1 + signal.timing_signal * 0.3)
 
-        # 5. Price level adjustment
-        # If price is extreme AND we have confirming signals, boost confidence
-        price = signal.kalshi_price
+        # 6. Near-term bonus (markets expiring soon get a boost)
+        if signal.days_to_expiry is not None:
+            if signal.days_to_expiry <= 7:
+                score *= 1.3  # Expiring this week
+            elif signal.days_to_expiry <= 14:
+                score *= 1.15  # Expiring next week
+
+        # 7. Price level value adjustment
         if score > 0 and price < 0.40:
-            # Bullish signal + low price = good value
-            score *= 1.2
+            score *= 1.2  # Bullish + cheap = good value
         elif score < 0 and price > 0.60:
-            # Bearish signal + high price = good value on NO
-            score *= 1.2
-        elif score > 0 and price > 0.70:
-            # Bullish but already expensive - reduce score
-            score *= 0.7
-        elif score < 0 and price < 0.30:
-            # Bearish but already cheap - reduce score
-            score *= 0.7
+            score *= 1.2  # Bearish + expensive = good NO value
 
         signal.composite_score = score
         return score
@@ -405,6 +420,13 @@ class StrategyGenerator:
                 continue
 
         logger.info(f"Found {len(scored_markets)} markets settling in {days_min}-{days_max} days")
+
+        # Debug: show score distribution
+        if scored_markets:
+            scores = [abs(s[1]) for s in scored_markets]
+            logger.info(f"Score range: {min(scores):.4f} to {max(scores):.4f}, threshold: {self.MIN_SCORE_THRESHOLD}")
+            above_threshold = sum(1 for s in scores if s >= self.MIN_SCORE_THRESHOLD)
+            logger.info(f"Markets above threshold: {above_threshold}")
 
         # Generate recommendations for markets with significant scores
         for signal, score in scored_markets:
