@@ -69,6 +69,9 @@ class StrategyGenerator:
         """Generate all trading recommendations."""
         recommendations = []
 
+        # Kalshi market opportunities (price extremes, volume)
+        recommendations.extend(self._analyze_kalshi_opportunities())
+
         # Economic-based recommendations
         recommendations.extend(self._analyze_economic_markets())
 
@@ -83,6 +86,77 @@ class StrategyGenerator:
         recommendations.sort(key=lambda x: confidence_order.get(x.confidence, 3))
 
         return recommendations
+
+    def _analyze_kalshi_opportunities(self) -> list[TradeRecommendation]:
+        """Find opportunities in Kalshi markets based on price and volume."""
+        recommendations = []
+        now = datetime.utcnow()
+
+        kalshi_markets = self.db.get_latest_markets(source="kalshi", limit=1000)
+
+        for market in kalshi_markets:
+            data = json.loads(market.get("data", "{}"))
+            ticker = data.get("ticker", "UNKNOWN")
+            title = data.get("title", "")
+            price = data.get("yes_price")
+            volume = data.get("volume") or 0
+            volume_24h = data.get("volume_24h") or 0
+            open_interest = data.get("open_interest") or 0
+
+            if price is None:
+                continue
+
+            reasoning = []
+            action = "HOLD"
+            confidence = "LOW"
+
+            # High volume indicates liquid, active market
+            is_liquid = volume > 10000 or volume_24h > 1000
+
+            # Extreme prices might indicate mispricing
+            # Very low prices (<15c) - potential value if you disagree with consensus
+            if price < 0.15 and is_liquid:
+                reasoning.append(f"Low price ${price:.2f} - market sees this as unlikely")
+                reasoning.append(f"Volume: {volume:,} contracts traded")
+                if volume_24h > 500:
+                    reasoning.append(f"Active trading: {volume_24h:,} in 24h")
+                action = "BUY_YES"  # Contrarian play
+                confidence = "LOW"
+
+            # Very high prices (>85c) - potential short if you disagree
+            elif price > 0.85 and is_liquid:
+                reasoning.append(f"High price ${price:.2f} - market sees this as very likely")
+                reasoning.append(f"Volume: {volume:,} contracts traded")
+                action = "BUY_NO"  # Contrarian play
+                confidence = "LOW"
+
+            # Medium confidence: prices in uncertain range with high volume
+            elif 0.35 <= price <= 0.65 and volume_24h > 2000:
+                reasoning.append(f"Uncertain outcome (${price:.2f}) with high activity")
+                reasoning.append(f"24h volume: {volume_24h:,} - active trading")
+                reasoning.append("Market is undecided - research the fundamentals")
+                action = "HOLD"  # Flag for research
+                confidence = "MEDIUM"
+
+            # Only add if we have meaningful reasoning
+            if reasoning and action != "HOLD":
+                recommendations.append(TradeRecommendation(
+                    ticker=ticker,
+                    title=title,
+                    action=action,
+                    confidence=confidence,
+                    current_price=price,
+                    target_price=None,
+                    reasoning=reasoning,
+                    category=market.get("category", "other"),
+                    data_sources=["kalshi"],
+                    timestamp=now,
+                ))
+
+        # Sort by volume (most liquid first)
+        recommendations.sort(key=lambda x: -(x.current_price or 0))
+
+        return recommendations[:20]  # Top 20 opportunities
 
     def _analyze_economic_markets(self) -> list[TradeRecommendation]:
         """Analyze economic indicators vs market prices."""
