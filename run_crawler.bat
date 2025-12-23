@@ -1,9 +1,14 @@
 @echo off
 title Kalshi Crawler
-cd /d "%~dp0"
+cd /d "C:\Users\sonso\isoengine"
 
 echo ============================================
 echo         KALSHI CRAWLER LAUNCHER
+echo ============================================
+echo.
+echo Pulling latest code...
+git pull origin claude/kalshi-web-crawler-Cl45i
+echo.
 echo ============================================
 echo.
 echo Choose an option:
