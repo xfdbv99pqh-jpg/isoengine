@@ -23,6 +23,35 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
+class MarketSignal:
+    """Aggregated signals for a single market from all data sources."""
+    ticker: str
+    title: str
+    kalshi_price: float
+    volume_24h: int
+    total_volume: int
+    days_to_expiry: Optional[int]
+
+    # Cross-market signals (None if no data)
+    polymarket_price: Optional[float] = None
+    betting_odds_price: Optional[float] = None
+
+    # Sentiment signals (-1 to +1, None if no data)
+    social_sentiment: Optional[float] = None
+    news_sentiment: Optional[float] = None
+
+    # Catalyst flags
+    has_calendar_event: bool = False
+    calendar_event_days: Optional[int] = None
+
+    # Computed scores
+    cross_market_signal: float = 0.0  # Positive = bullish, negative = bearish
+    volume_signal: float = 0.0
+    timing_signal: float = 0.0
+    composite_score: float = 0.0
+
+
+@dataclass
 class TradeRecommendation:
     """A recommended trade with reasoning."""
 
@@ -37,6 +66,7 @@ class TradeRecommendation:
     data_sources: list[str]
     timestamp: datetime
     edge: Optional[float] = None  # Expected edge/alpha
+    signal: Optional[MarketSignal] = None  # Full signal data
 
     def __str__(self):
         arrow = "↑" if self.action == "BUY_YES" else "↓" if self.action == "BUY_NO" else "→"
@@ -63,45 +93,391 @@ class TradeRecommendation:
 class StrategyGenerator:
     """Generates Kalshi trading strategies based on collected data."""
 
+    # Scoring weights (should sum to ~1.0)
+    WEIGHT_CROSS_MARKET = 0.35  # Polymarket/betting odds disagreement
+    WEIGHT_SENTIMENT = 0.20     # Social + news sentiment
+    WEIGHT_VOLUME = 0.15        # Volume/activity signal
+    WEIGHT_TIMING = 0.15        # Calendar events + expiry
+    WEIGHT_PRICE_LEVEL = 0.15   # Price extremes (but informed by other signals)
+
+    # Thresholds
+    MIN_SCORE_THRESHOLD = 0.10  # Minimum composite score to recommend
+    HIGH_CONFIDENCE_THRESHOLD = 0.25
+    MEDIUM_CONFIDENCE_THRESHOLD = 0.15
+
     def __init__(self, db: CrawlerDatabase):
         self.db = db
+        self._reference_data = None
+
+    def _build_reference_data(self) -> dict:
+        """Load all reference data from other sources for cross-referencing."""
+        if self._reference_data is not None:
+            return self._reference_data
+
+        data = {
+            "polymarket": {},      # ticker/question -> price
+            "betting_odds": {},    # candidate/event -> probability
+            "social_sentiment": {},  # keyword -> sentiment score
+            "calendar_events": [],   # upcoming events
+            "news_keywords": {},     # keyword -> sentiment
+        }
+
+        # Load Polymarket prices
+        poly_markets = self.db.get_latest_markets(source="polymarket", limit=500)
+        for pm in poly_markets:
+            try:
+                pm_data = json.loads(pm.get("data", "{}"))
+                question = (pm_data.get("question") or pm_data.get("title") or "").lower()
+                price = pm_data.get("prices", {}).get("Yes") or pm_data.get("yes_price")
+                if question and price:
+                    # Store with multiple key variations for matching
+                    data["polymarket"][question] = price
+                    # Also index by key terms
+                    for term in ["trump", "biden", "fed", "inflation", "bitcoin", "tesla", "nvidia"]:
+                        if term in question:
+                            if term not in data["polymarket"]:
+                                data["polymarket"][term] = []
+                            data["polymarket"][term].append({"question": question, "price": price})
+            except:
+                continue
+
+        # Load betting odds
+        for source in ["betting_election", "betting_metaculus"]:
+            betting = self.db.get_latest_markets(source=source, limit=100)
+            for bd in betting:
+                try:
+                    bd_data = json.loads(bd.get("data", "{}"))
+                    candidate = (bd_data.get("candidate") or bd_data.get("title") or "").lower()
+                    prob = bd_data.get("probability")
+                    if candidate and prob:
+                        data["betting_odds"][candidate] = prob
+                except:
+                    continue
+
+        # Load social sentiment by keyword
+        for subreddit in ["wallstreetbets", "stocks", "investing", "politics", "technology"]:
+            reddit = self.db.get_latest_markets(source=f"reddit_{subreddit}", limit=50)
+            for item in reddit:
+                try:
+                    item_data = json.loads(item.get("data", "{}"))
+                    keywords = item_data.get("keywords_found", [])
+                    sentiment = item_data.get("sentiment", "neutral")
+                    score = item_data.get("score", 0) or 0
+
+                    sent_value = 1 if sentiment == "positive" else (-1 if sentiment == "negative" else 0)
+
+                    for kw in keywords:
+                        if kw not in data["social_sentiment"]:
+                            data["social_sentiment"][kw] = {"sum": 0, "count": 0, "total_score": 0}
+                        data["social_sentiment"][kw]["sum"] += sent_value
+                        data["social_sentiment"][kw]["count"] += 1
+                        data["social_sentiment"][kw]["total_score"] += score
+                except:
+                    continue
+
+        # Load HN data too
+        hn = self.db.get_latest_markets(source="hackernews", limit=50)
+        for item in hn:
+            try:
+                item_data = json.loads(item.get("data", "{}"))
+                keywords = item_data.get("keywords_found", [])
+                for kw in keywords:
+                    if kw not in data["social_sentiment"]:
+                        data["social_sentiment"][kw] = {"sum": 0, "count": 0, "total_score": 0}
+                    data["social_sentiment"][kw]["count"] += 1
+            except:
+                continue
+
+        # Load calendar events
+        for source in ["calendar_fomc", "calendar_bls"]:
+            cal = self.db.get_latest_markets(source=source, limit=20)
+            for event in cal:
+                try:
+                    ev_data = json.loads(event.get("data", "{}"))
+                    days_until = ev_data.get("days_until")
+                    if days_until is not None and days_until <= 30:
+                        data["calendar_events"].append(ev_data)
+                except:
+                    continue
+
+        self._reference_data = data
+        return data
+
+    def _compute_market_signal(self, k_data: dict, ref_data: dict) -> Optional[MarketSignal]:
+        """Compute aggregated signal for a single Kalshi market."""
+        ticker = k_data.get("ticker", "UNKNOWN")
+        title = k_data.get("title", "")
+        title_lower = title.lower()
+        price = k_data.get("yes_price")
+
+        if not price or price <= 0.02 or price >= 0.98:
+            return None  # Skip resolved/dead markets
+
+        volume = k_data.get("volume") or 0
+        volume_24h = k_data.get("volume_24h") or 0
+        close_time = k_data.get("close_time") or k_data.get("expiration_time")
+
+        # Calculate days to expiry
+        days_to_expiry = None
+        now = datetime.utcnow()
+        if close_time:
+            try:
+                if isinstance(close_time, str):
+                    close_dt = datetime.fromisoformat(close_time.replace('Z', '+00:00').replace('+00:00', ''))
+                    days_to_expiry = (close_dt - now).days
+            except:
+                pass
+
+        signal = MarketSignal(
+            ticker=ticker,
+            title=title,
+            kalshi_price=price,
+            volume_24h=volume_24h,
+            total_volume=volume,
+            days_to_expiry=days_to_expiry,
+        )
+
+        # --- Cross-market signal ---
+        cross_signals = []
+
+        # Check Polymarket
+        for term, poly_data in ref_data["polymarket"].items():
+            if isinstance(poly_data, list):
+                # It's a keyword index
+                if term in title_lower:
+                    for pm in poly_data:
+                        if self._titles_match(title_lower, pm["question"]):
+                            signal.polymarket_price = pm["price"]
+                            diff = pm["price"] - price  # Positive = Poly thinks higher
+                            cross_signals.append(diff)
+                            break
+            elif term in title_lower:
+                signal.polymarket_price = poly_data
+                diff = poly_data - price
+                cross_signals.append(diff)
+
+        # Check betting odds
+        for candidate, prob in ref_data["betting_odds"].items():
+            if candidate in title_lower:
+                signal.betting_odds_price = prob
+                diff = prob - price  # Positive = betting thinks higher
+                cross_signals.append(diff)
+                break
+
+        if cross_signals:
+            signal.cross_market_signal = sum(cross_signals) / len(cross_signals)
+
+        # --- Social sentiment signal ---
+        sentiment_signals = []
+        for kw, sent_data in ref_data["social_sentiment"].items():
+            if kw in title_lower and sent_data["count"] >= 3:
+                avg_sent = sent_data["sum"] / sent_data["count"]  # -1 to +1
+                sentiment_signals.append(avg_sent)
+                signal.social_sentiment = avg_sent
+
+        if sentiment_signals:
+            avg_sentiment = sum(sentiment_signals) / len(sentiment_signals)
+            signal.social_sentiment = avg_sentiment
+
+        # --- Calendar/timing signal ---
+        for event in ref_data["calendar_events"]:
+            event_type = event.get("type", "")
+            event_keywords = []
+            if "fomc" in event_type:
+                event_keywords = ["fed", "fomc", "rate", "powell", "interest"]
+            elif event_type in ("jobs_report", "cpi"):
+                event_keywords = ["jobs", "unemployment", "cpi", "inflation", "payroll"]
+
+            if any(kw in title_lower for kw in event_keywords):
+                signal.has_calendar_event = True
+                signal.calendar_event_days = event.get("days_until", 30)
+                # Closer event = stronger timing signal
+                signal.timing_signal = max(0, (14 - (signal.calendar_event_days or 30)) / 14)
+                break
+
+        # --- Volume signal ---
+        if volume_24h >= 5000:
+            signal.volume_signal = 1.0
+        elif volume_24h >= 1000:
+            signal.volume_signal = 0.6
+        elif volume_24h >= 500:
+            signal.volume_signal = 0.3
+        elif volume_24h >= 100:
+            signal.volume_signal = 0.1
+
+        return signal
+
+    def _score_market(self, signal: MarketSignal) -> float:
+        """
+        Compute composite score for a market.
+        Positive score = bullish (buy YES), negative = bearish (buy NO).
+        Magnitude indicates confidence.
+        """
+        score = 0.0
+
+        # 1. Cross-market signal (most important)
+        # If Polymarket/betting says higher, that's bullish for YES
+        if signal.cross_market_signal != 0:
+            score += signal.cross_market_signal * self.WEIGHT_CROSS_MARKET * 2  # Scale up
+
+        # 2. Sentiment signal
+        if signal.social_sentiment is not None:
+            # Positive sentiment = bullish
+            score += signal.social_sentiment * self.WEIGHT_SENTIMENT
+
+        # 3. Volume signal (amplifies other signals, doesn't set direction)
+        # High volume makes us more confident in whatever direction we're leaning
+        if signal.volume_signal > 0:
+            score *= (1 + signal.volume_signal * 0.5)
+
+        # 4. Timing signal (catalyst upcoming)
+        if signal.has_calendar_event and signal.timing_signal > 0:
+            # Catalyst upcoming amplifies signal
+            score *= (1 + signal.timing_signal * 0.3)
+
+        # 5. Price level adjustment
+        # If price is extreme AND we have confirming signals, boost confidence
+        price = signal.kalshi_price
+        if score > 0 and price < 0.40:
+            # Bullish signal + low price = good value
+            score *= 1.2
+        elif score < 0 and price > 0.60:
+            # Bearish signal + high price = good value on NO
+            score *= 1.2
+        elif score > 0 and price > 0.70:
+            # Bullish but already expensive - reduce score
+            score *= 0.7
+        elif score < 0 and price < 0.30:
+            # Bearish but already cheap - reduce score
+            score *= 0.7
+
+        signal.composite_score = score
+        return score
+
+    def _titles_match(self, title1: str, title2: str) -> bool:
+        """Check if two market titles are likely about the same thing."""
+        # Simple keyword overlap check
+        words1 = set(title1.split())
+        words2 = set(title2.split())
+        overlap = len(words1 & words2)
+        return overlap >= 3
 
     def generate_recommendations(self) -> list[TradeRecommendation]:
-        """Generate all trading recommendations."""
+        """Generate trading recommendations using composite scoring model."""
         recommendations = []
+        now = datetime.utcnow()
 
-        # 1. Cross-market arbitrage (highest confidence)
+        # Build reference data from all sources
+        ref_data = self._build_reference_data()
+
+        # Get all Kalshi markets
+        kalshi_markets = self.db.get_latest_markets(source="kalshi", limit=1000)
+
+        # Score each market
+        scored_markets = []
+        for km in kalshi_markets:
+            try:
+                k_data = json.loads(km.get("data", "{}"))
+                signal = self._compute_market_signal(k_data, ref_data)
+
+                if signal is None:
+                    continue
+
+                # Require some activity
+                if signal.volume_24h < 50 and signal.total_volume < 1000:
+                    continue
+
+                score = self._score_market(signal)
+                scored_markets.append((signal, score))
+            except Exception as e:
+                logger.debug(f"Error scoring market: {e}")
+                continue
+
+        # Generate recommendations for markets with significant scores
+        for signal, score in scored_markets:
+            abs_score = abs(score)
+
+            if abs_score < self.MIN_SCORE_THRESHOLD:
+                continue  # Score too weak
+
+            # Determine action and confidence
+            if score > 0:
+                action = "BUY_YES"
+            else:
+                action = "BUY_NO"
+
+            if abs_score >= self.HIGH_CONFIDENCE_THRESHOLD:
+                confidence = "HIGH"
+            elif abs_score >= self.MEDIUM_CONFIDENCE_THRESHOLD:
+                confidence = "MEDIUM"
+            else:
+                confidence = "LOW"
+
+            # Build reasoning based on what signals contributed
+            reasoning = []
+            data_sources = ["kalshi"]
+
+            if signal.polymarket_price is not None:
+                diff = signal.polymarket_price - signal.kalshi_price
+                direction = "higher" if diff > 0 else "lower"
+                reasoning.append(f"Polymarket @ ${signal.polymarket_price:.2f} ({abs(diff)*100:.1f}% {direction})")
+                data_sources.append("polymarket")
+
+            if signal.betting_odds_price is not None:
+                diff = signal.betting_odds_price - signal.kalshi_price
+                direction = "higher" if diff > 0 else "lower"
+                reasoning.append(f"Betting odds @ ${signal.betting_odds_price:.2f} ({abs(diff)*100:.1f}% {direction})")
+                data_sources.append("betting")
+
+            if signal.social_sentiment is not None and abs(signal.social_sentiment) > 0.2:
+                sent_str = "bullish" if signal.social_sentiment > 0 else "bearish"
+                reasoning.append(f"Social sentiment: {sent_str} ({signal.social_sentiment:+.2f})")
+                data_sources.append("social")
+
+            if signal.has_calendar_event:
+                reasoning.append(f"Catalyst in {signal.calendar_event_days} days")
+                data_sources.append("calendar")
+
+            if signal.volume_24h >= 1000:
+                reasoning.append(f"High volume: {signal.volume_24h:,} 24h")
+
+            reasoning.append(f"Kalshi @ ${signal.kalshi_price:.2f}")
+            reasoning.append(f"Composite score: {score:+.3f}")
+
+            # Calculate edge as the cross-market difference
+            edge = abs(signal.cross_market_signal) * 100 if signal.cross_market_signal else abs_score * 100
+
+            recommendations.append(TradeRecommendation(
+                ticker=signal.ticker,
+                title=signal.title,
+                action=action,
+                confidence=confidence,
+                current_price=signal.kalshi_price,
+                target_price=signal.polymarket_price or signal.betting_odds_price,
+                reasoning=reasoning,
+                category="composite_score",
+                data_sources=data_sources,
+                timestamp=now,
+                edge=edge,
+                signal=signal,
+            ))
+
+        # Sort by absolute score (confidence)
+        recommendations.sort(key=lambda x: -abs(x.signal.composite_score if x.signal else 0))
+
+        # Also run legacy methods for additional coverage
         recommendations.extend(self._find_arbitrage_opportunities())
-
-        # 2. Betting odds arbitrage (cross-platform)
-        recommendations.extend(self._find_betting_odds_arbitrage())
-
-        # 3. Economic indicator misalignment
         recommendations.extend(self._analyze_economic_misalignment())
 
-        # 4. Calendar-driven opportunities (FOMC, BLS, earnings)
-        recommendations.extend(self._analyze_calendar_events())
+        # Deduplicate by ticker (keep highest score)
+        seen_tickers = set()
+        unique_recs = []
+        for rec in recommendations:
+            if rec.ticker not in seen_tickers:
+                seen_tickers.add(rec.ticker)
+                unique_recs.append(rec)
 
-        # 5. High volume + price extreme opportunities
-        recommendations.extend(self._analyze_volume_price_extremes())
-
-        # 6. Expiring soon with uncertain prices
-        recommendations.extend(self._analyze_expiring_markets())
-
-        # 7. News-driven momentum
-        recommendations.extend(self._analyze_news_momentum())
-
-        # 8. Social sentiment signals
-        recommendations.extend(self._analyze_social_sentiment())
-
-        # Sort by confidence then edge
-        confidence_order = {"HIGH": 0, "MEDIUM": 1, "LOW": 2}
-        recommendations.sort(key=lambda x: (
-            confidence_order.get(x.confidence, 3),
-            -(x.edge or 0)
-        ))
-
-        return recommendations
+        return unique_recs
 
     def _find_arbitrage_opportunities(self) -> list[TradeRecommendation]:
         """Find price discrepancies between Kalshi and Polymarket."""
