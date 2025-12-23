@@ -362,8 +362,13 @@ class StrategyGenerator:
         overlap = len(words1 & words2)
         return overlap >= 3
 
-    def generate_recommendations(self) -> list[TradeRecommendation]:
-        """Generate trading recommendations using composite scoring model."""
+    def generate_recommendations(self, days_min: int = 1, days_max: int = 14) -> list[TradeRecommendation]:
+        """Generate trading recommendations using composite scoring model.
+
+        Args:
+            days_min: Minimum days to expiry (default 1)
+            days_max: Maximum days to expiry (default 14)
+        """
         recommendations = []
         now = datetime.utcnow()
 
@@ -383,6 +388,12 @@ class StrategyGenerator:
                 if signal is None:
                     continue
 
+                # FILTER: Only markets settling within specified window
+                if signal.days_to_expiry is None:
+                    continue  # Skip if no expiry date
+                if signal.days_to_expiry < days_min or signal.days_to_expiry > days_max:
+                    continue  # Outside our window
+
                 # Require some activity
                 if signal.volume_24h < 50 and signal.total_volume < 1000:
                     continue
@@ -392,6 +403,8 @@ class StrategyGenerator:
             except Exception as e:
                 logger.debug(f"Error scoring market: {e}")
                 continue
+
+        logger.info(f"Found {len(scored_markets)} markets settling in {days_min}-{days_max} days")
 
         # Generate recommendations for markets with significant scores
         for signal, score in scored_markets:
@@ -1223,9 +1236,15 @@ class StrategyGenerator:
 
         return recommendations[:10]
 
-    def get_top_picks(self, n: int = 10) -> list[TradeRecommendation]:
-        """Get top N actionable recommendations."""
-        recs = self.generate_recommendations()
+    def get_top_picks(self, n: int = 10, days_min: int = 1, days_max: int = 14) -> list[TradeRecommendation]:
+        """Get top N actionable recommendations.
+
+        Args:
+            n: Number of picks to return
+            days_min: Minimum days to expiry (default 1)
+            days_max: Maximum days to expiry (default 14)
+        """
+        recs = self.generate_recommendations(days_min=days_min, days_max=days_max)
         # Filter to actionable (BUY_YES or BUY_NO)
         actionable = [r for r in recs if r.action in ("BUY_YES", "BUY_NO")]
         return actionable[:n]

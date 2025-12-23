@@ -342,6 +342,8 @@ def main():
     parser.add_argument("--status", action="store_true", help="Show status and exit")
     parser.add_argument("--strategy", action="store_true", help="Generate investment strategy report")
     parser.add_argument("--picks", type=int, metavar="N", help="Show top N trading picks")
+    parser.add_argument("--days-min", type=int, default=1, help="Minimum days to expiry (default: 1)")
+    parser.add_argument("--days-max", type=int, default=14, help="Maximum days to expiry (default: 14)")
     args = parser.parse_args()
 
     runner = CrawlerRunner()
@@ -352,18 +354,25 @@ def main():
     elif args.strategy:
         print(runner.strategy.print_strategy_report())
     elif args.picks:
-        picks = runner.strategy.get_top_picks(args.picks)
+        days_min = args.days_min
+        days_max = args.days_max
+        picks = runner.strategy.get_top_picks(args.picks, days_min=days_min, days_max=days_max)
         print(f"\n{'='*60}")
-        print(f"TOP {len(picks)} KALSHI PICKS")
+        print(f"TOP {len(picks)} KALSHI PICKS (settling in {days_min}-{days_max} days)")
         print(f"{'='*60}\n")
+        if not picks:
+            print("No picks found matching criteria.")
+            print("Try: --days-max 30 for longer timeframe")
+            print("Or run --once first to crawl fresh data")
         for i, pick in enumerate(picks, 1):
             conf = {"HIGH": "★★★", "MEDIUM": "★★☆", "LOW": "★☆☆"}.get(pick.confidence, "?")
             action = {"BUY_YES": "🟢 YES", "BUY_NO": "🔴 NO"}.get(pick.action, pick.action)
             price_str = f" @ ${pick.current_price:.2f}" if pick.current_price else ""
-            print(f"{i}. {conf} {action}{price_str}")
+            days_str = f" ({pick.signal.days_to_expiry}d)" if pick.signal and pick.signal.days_to_expiry else ""
+            print(f"{i}. {conf} {action}{price_str}{days_str}")
             print(f"   {pick.ticker}")
             print(f"   {pick.title[:55]}...")
-            for r in pick.reasoning[:2]:
+            for r in pick.reasoning[:3]:
                 print(f"   → {r}")
             print()
     elif args.shell:
