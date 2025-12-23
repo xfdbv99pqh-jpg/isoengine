@@ -342,8 +342,8 @@ def main():
     parser.add_argument("--status", action="store_true", help="Show status and exit")
     parser.add_argument("--strategy", action="store_true", help="Generate investment strategy report")
     parser.add_argument("--picks", type=int, metavar="N", help="Show top N trading picks")
-    parser.add_argument("--days-min", type=int, default=1, help="Minimum days to expiry (default: 1)")
-    parser.add_argument("--days-max", type=int, default=14, help="Maximum days to expiry (default: 14)")
+    parser.add_argument("--days-min", type=int, default=0, help="Minimum days to expiry (default: 0)")
+    parser.add_argument("--days-max", type=int, default=60, help="Maximum days to expiry (default: 60)")
     args = parser.parse_args()
 
     runner = CrawlerRunner()

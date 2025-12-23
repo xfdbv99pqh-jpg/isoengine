@@ -124,7 +124,7 @@ class StrategyGenerator:
 
         # Load Polymarket prices
         poly_markets = self.db.get_latest_markets(source="polymarket", limit=500)
-        logger.debug(f"Raw Polymarket markets from DB: {len(poly_markets)}")
+        logger.info(f"Raw Polymarket markets from DB: {len(poly_markets)}")
         poly_loaded = 0
         for pm in poly_markets:
             try:
@@ -153,9 +153,9 @@ class StrategyGenerator:
                                 data["polymarket"][term] = []
                             data["polymarket"][term].append({"question": question, "price": price})
             except Exception as e:
-                logger.debug(f"Error loading Polymarket data: {e}")
+                logger.info(f"Error loading Polymarket data: {e}")
                 continue
-        logger.debug(f"Loaded {poly_loaded} Polymarket markets with prices")
+        logger.info(f"Loaded {poly_loaded} Polymarket markets with prices")
 
         # Load betting odds
         for source in ["betting_election", "betting_metaculus"]:
@@ -394,7 +394,7 @@ class StrategyGenerator:
         overlap = len(words1 & words2)
         return overlap >= 3
 
-    def generate_recommendations(self, days_min: int = 1, days_max: int = 14) -> list[TradeRecommendation]:
+    def generate_recommendations(self, days_min: int = 0, days_max: int = 60) -> list[TradeRecommendation]:
         """Generate trading recommendations using composite scoring model.
 
         Args:
@@ -1295,13 +1295,13 @@ class StrategyGenerator:
 
         return recommendations[:10]
 
-    def get_top_picks(self, n: int = 10, days_min: int = 1, days_max: int = 14) -> list[TradeRecommendation]:
+    def get_top_picks(self, n: int = 10, days_min: int = 0, days_max: int = 60) -> list[TradeRecommendation]:
         """Get top N actionable recommendations.
 
         Args:
             n: Number of picks to return
-            days_min: Minimum days to expiry (default 1)
-            days_max: Maximum days to expiry (default 14)
+            days_min: Minimum days to expiry (default 0)
+            days_max: Maximum days to expiry (default 60)
         """
         recs = self.generate_recommendations(days_min=days_min, days_max=days_max)
         # Filter to actionable (BUY_YES or BUY_NO)
