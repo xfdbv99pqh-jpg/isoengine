@@ -10,10 +10,10 @@ from pathlib import Path
 class CrawlerConfig:
     """Central configuration for all crawlers."""
 
-    # API Keys (set via environment variables)
+    # API Keys (environment variables override defaults)
     kalshi_api_key: Optional[str] = field(default_factory=lambda: os.getenv("KALSHI_API_KEY"))
     kalshi_api_secret: Optional[str] = field(default_factory=lambda: os.getenv("KALSHI_API_SECRET"))
-    fred_api_key: Optional[str] = field(default_factory=lambda: os.getenv("FRED_API_KEY"))
+    fred_api_key: Optional[str] = field(default_factory=lambda: os.getenv("FRED_API_KEY", "98c03a5ce94055b8d476157e6363f35c"))
 
     # Storage
     db_path: Path = field(default_factory=lambda: Path("./kalshi_data.db"))
@@ -87,7 +87,7 @@ class CrawlerConfig:
         return cls(
             kalshi_api_key=os.getenv("KALSHI_API_KEY"),
             kalshi_api_secret=os.getenv("KALSHI_API_SECRET"),
-            fred_api_key=os.getenv("FRED_API_KEY"),
+            fred_api_key=os.getenv("FRED_API_KEY", "98c03a5ce94055b8d476157e6363f35c"),
             db_path=Path(os.getenv("CRAWLER_DB_PATH", "./kalshi_data.db")),
         )
 
