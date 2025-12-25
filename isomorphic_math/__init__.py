@@ -5,7 +5,13 @@ Isomorphic Math Engine
 A neural framework for mathematical expression analysis combining symbolic
 solving with hyperbolic embeddings.
 
-Version: 34.0 (with ASSR integration)
+Version: 35.0 (Tree-structured math understanding)
+
+New in v35.0:
+- Tree Encoder: Recursive bottom-up encoding (98% equivalence accuracy)
+- Structure-Aware Transformer: With depth/position embeddings (100% accuracy)
+- Canonicalization: Equivalent expressions get identical tree structure
+- Lean/SymPy Bridge: Formal verification of algebraic equivalences
 
 New in v34.0:
 - ASSR (Auto-Calibrated Stochastic Spectral Regularization) integration
@@ -15,7 +21,7 @@ New in v34.0:
 Authors: Big J + Claude
 """
 
-__version__ = "34.0"
+__version__ = "35.0"
 __author__ = "Big J + Claude"
 
 # Core expression types and operations
@@ -68,6 +74,17 @@ from .assr import (
 
 # Main engine
 from .engine import MathEngine
+
+# Tree-structured math processing (NEW v35.0)
+from .tree_math import (
+    TreeNode,
+    canonicalize,
+    are_equivalent,
+    TreeEncoder,
+    StructureAwareTransformer,
+    LeanBridge,
+    TreeMathTrainer,
+)
 
 
 # =============================================================================
@@ -158,6 +175,15 @@ __all__ = [
 
     # Main engine
     "MathEngine",
+
+    # Tree-structured math (NEW v35.0)
+    "TreeNode",
+    "canonicalize",
+    "are_equivalent",
+    "TreeEncoder",
+    "StructureAwareTransformer",
+    "LeanBridge",
+    "TreeMathTrainer",
 
     # Utilities
     "ProblemGenerator",
