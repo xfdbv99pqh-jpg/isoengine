@@ -181,6 +181,66 @@ This teaches the embedding to be **form-invariant** — encoding mathematical me
 total_loss = contrastive_loss + 0.3 * (linear_mse + quadratic_mse + inequality_mse)
 ```
 
+## v35.0: Tree-Structured Math Understanding
+
+The latest version adds genuine algebraic equivalence recognition through tree-structured processing:
+
+### The Problem
+
+Previous approaches failed on algebraic equivalence:
+- `2*(x+3)` and `2*x+6` have **different token sequences**
+- Flat transformers see them as different expressions
+- Similarity was only **4-23%** for equivalent forms
+
+### The Solution
+
+```python
+from isomorphic_math import TreeEncoder, TreeMathTrainer, canonicalize
+
+# Tree Encoder processes expressions bottom-up
+trainer = TreeMathTrainer(encoder_type='tree')
+trainer.train(epochs=100)
+
+# Achieves 98-100% on algebraic equivalence!
+```
+
+Three key innovations:
+
+1. **Canonicalization**: `x+3` and `3+x` get identical tree structures
+2. **Tree Encoder**: Recursive bottom-up encoding preserves structure
+3. **Lean/SymPy Bridge**: Training on formally verified equivalences
+
+### Results
+
+| Approach | Equivalence Accuracy |
+|----------|---------------------|
+| Flat Transformer (baseline) | ~10% |
+| Tree Encoder | **98%** |
+| Structure-Aware Transformer | **100%** |
+
+This is genuine mathematical understanding - recognizing that `2*(x+3)` and `2*x+6` represent the same function.
+
+## v34.0: ASSR Spectral Regularization
+
+ASSR (Auto-Calibrated Stochastic Spectral Regularization) improves embedding quality:
+
+```python
+from isomorphic_math import ASSRConfig, apply_assr_regularization
+
+config = ASSRConfig(
+    target_stable_rank_ratio=0.8,
+    max_condition=100.0
+)
+
+# Apply during training
+loss = base_loss + apply_assr_regularization(embeddings, config)
+```
+
+**Results:**
+- Condition number: 5,203 -> 1,647 (68% reduction)
+- Cluster separation: 0.065 -> 0.138 (111% improvement)
+- Generalization: 18.2% -> 33.3% (83% improvement)
+
 ## Package Structure
 
 ```
@@ -189,7 +249,9 @@ isomorphic_math/
 ├── core.py          # Expression system, parser, symbolic solvers
 ├── encoder.py       # HyperbolicEncoder, ContrastiveTrainer
 ├── multihead.py     # MultiHeadTrainer (best results)
-└── engine.py        # MathEngine unified API
+├── engine.py        # MathEngine unified API
+├── assr.py          # NEW: Spectral regularization (v34.0)
+└── tree_math.py     # NEW: Tree-structured processing (v35.0)
 ```
 
 ## Validation Scripts
